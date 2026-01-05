@@ -175,22 +175,30 @@ export class KanbanizeImporter implements Importer {
 
       const label = typeLabels[type];
       const items = relations.map(link => {
-        const linkedCard = this.exportData.cards.find(c => c.card_id === link.card_id);
-        const title = linkedCard?.title || `Card #${link.card_id}`;
-        const url = `${KANBANIZE_BASE_URL}/ctrl_board/${this.metadata.boardId}/cards/${link.card_id}`;
+        // Use enriched data from linked card if available (for cross-board references)
+        const title = link.title || `Card #${link.card_id}`;
+
+        // Use the linked card's board_id if available, otherwise use current board
+        const linkedBoardId = link.board_id || this.metadata.boardId;
+        const url = `${KANBANIZE_BASE_URL}/ctrl_board/${linkedBoardId}/cards/${link.card_id}`;
+
         const isMigrated = this.migratedCardIds.has(link.card_id);
         const marker = isMigrated ? "*(migrated)*" : "*(not migrated)*";
+        const kanbanizeId = `kn-${link.card_id}`;
 
-        // Get the status (column name) of the linked card
+        // Get the status (column name) - use enriched data if available
         let statusInfo = "";
-        if (linkedCard) {
-          const column = this.exportData.columns[linkedCard.column_id];
-          if (column) {
-            statusInfo = ` [${column.name}]`;
-          }
+        if (link.column_name) {
+          statusInfo = ` [${link.column_name}]`;
         }
 
-        return `- [${title}](${url})${statusInfo} ${marker}`;
+        // Add board indicator if it's from a different board
+        let boardInfo = "";
+        if (link.board_id && link.board_id !== this.metadata.boardId) {
+          boardInfo = ` *(board ${link.board_id})*`;
+        }
+
+        return `- [${title}](${url})${statusInfo}${boardInfo} *${kanbanizeId}* ${marker}`;
       });
 
       sections.push(`**${label}:**\n${items.join("\n")}`);
@@ -325,7 +333,9 @@ export class KanbanizeImporter implements Importer {
     // Build users map (only used users)
     for (const userId of usedUserIds) {
       const user = this.exportData.users[userId];
-      if (!user) {continue;}
+      if (!user) {
+        continue;
+      }
 
       // Skip users without email - they must be fetched from Kanbanize API
       if (!user.email) {
@@ -354,7 +364,9 @@ export class KanbanizeImporter implements Importer {
     // Build labels from tags (only used tags)
     for (const tagId of usedTagIds) {
       const tag = this.exportData.tags[tagId];
-      if (!tag) {continue;}
+      if (!tag) {
+        continue;
+      }
 
       importData.labels[String(tagId)] = {
         name: tag.label,

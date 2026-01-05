@@ -13,6 +13,7 @@ import type {
   KanbanizeBoardMetadata,
   KanbanizeColumn,
   KanbanizeLane,
+  KanbanizeLinkedCard,
   KanbanizeTag,
   KanbanizeUser,
   KanbanizeWorkspace,
@@ -45,6 +46,19 @@ export class KanbanizeExporter {
     // Export each board
     for (const boardId of boardIds) {
       await this.exportBoard(boardId, outputDir);
+    }
+
+    // Show final cache statistics
+    const finalCacheStats = this.client.getCacheStats();
+    if (finalCacheStats.hits + finalCacheStats.misses > 0) {
+      const hitRatePercent = (finalCacheStats.hitRate * 100).toFixed(1);
+      const savedRequests = finalCacheStats.hits;
+      console.log(
+        chalk.gray(
+          `\nTotal cache performance: ${finalCacheStats.hits} hits, ${finalCacheStats.misses} misses (${hitRatePercent}% hit rate)`
+        )
+      );
+      console.log(chalk.gray(`Saved ${savedRequests} API requests through caching`));
     }
 
     console.log(chalk.green(`\n✓ Export complete! Files saved to ${outputDir}\n`));
@@ -124,6 +138,9 @@ export class KanbanizeExporter {
     currentPhase = "processing";
     updateProgress(0, cards.length, "processing");
 
+    // Cache for linked card details (to avoid fetching the same card multiple times)
+    const linkedCardCache = new Map<number, { title: string; board_id: number; column_name?: string }>();
+
     for (const card of cards) {
       // Fetch comments for this card
       const comments = await this.client.getCardComments(card.card_id);
@@ -193,6 +210,46 @@ export class KanbanizeExporter {
         });
       }
 
+      // Enrich linked cards with details (especially for cross-board references)
+      const enrichedLinkedCards: KanbanizeLinkedCard[] = [];
+      if (card.linked_cards && card.linked_cards.length > 0) {
+        for (const link of card.linked_cards) {
+          const enrichedLink: KanbanizeLinkedCard = {
+            card_id: link.card_id,
+            link_type: link.link_type,
+          };
+
+          // Try to get details from cache first, or fetch if not cached
+          if (!linkedCardCache.has(link.card_id)) {
+            try {
+              const linkedCardDetails = await this.client.getCard(link.card_id);
+              const linkedCardColumn =
+                linkedCardDetails.board_id === boardId && columnsMap[linkedCardDetails.column_id]
+                  ? columnsMap[linkedCardDetails.column_id]
+                  : undefined;
+
+              linkedCardCache.set(link.card_id, {
+                title: linkedCardDetails.title,
+                board_id: linkedCardDetails.board_id,
+                column_name: linkedCardColumn?.name,
+              });
+            } catch (error) {
+              // If we can't fetch the card details, skip enrichment
+              console.warn(`\nWarning: Failed to fetch details for linked card ${link.card_id}: ${error}`);
+            }
+          }
+
+          const cachedDetails = linkedCardCache.get(link.card_id);
+          if (cachedDetails) {
+            enrichedLink.title = cachedDetails.title;
+            enrichedLink.board_id = cachedDetails.board_id;
+            enrichedLink.column_name = cachedDetails.column_name;
+          }
+
+          enrichedLinkedCards.push(enrichedLink);
+        }
+      }
+
       // Build exported card
       const exportedCard: ExportedCard = {
         card_id: card.card_id,
@@ -216,7 +273,7 @@ export class KanbanizeExporter {
         first_start_time: card.first_start_time,
         first_end_time: card.first_end_time,
         tag_ids: card.tag_ids || [],
-        linked_cards: card.linked_cards || [],
+        linked_cards: enrichedLinkedCards,
         attachments: exportedAttachments,
         comments: exportedComments,
       };
@@ -335,6 +392,17 @@ export class KanbanizeExporter {
 
     if (totalAttachments > 0) {
       console.log(chalk.green(`✓ Downloaded ${downloadedAttachments}/${totalAttachments} attachments`));
+    }
+
+    // Report cache statistics
+    const cacheStats = this.client.getCacheStats();
+    if (cacheStats.hits + cacheStats.misses > 0) {
+      const hitRatePercent = (cacheStats.hitRate * 100).toFixed(1);
+      console.log(
+        chalk.gray(
+          `Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${hitRatePercent}% hit rate, ${cacheStats.size} entries)`
+        )
+      );
     }
   }
 }

@@ -45,6 +45,10 @@ export interface KanbanizeLane {
 export interface KanbanizeLinkedCard {
   card_id: number;
   link_type: "parent" | "child" | "predecessor" | "successor" | "relative";
+  // Optional fields populated during export for cross-board references
+  title?: string;
+  board_id?: number;
+  column_name?: string; // Status/column name
 }
 
 export interface KanbanizeAttachment {

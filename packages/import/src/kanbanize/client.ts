@@ -21,13 +21,18 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 /**
  * Kanbanize API Client
  *
- * Handles authentication, rate limiting, and API requests to the Kanbanize (Businessmap) API.
+ * Handles authentication, rate limiting, caching, and API requests to the Kanbanize (Businessmap) API.
  */
 export class KanbanizeClient {
   private apiKey: string;
   private baseUrl: string;
   private requestTimestamps: number[] = [];
   private logCallback?: (message: string, isComplete?: boolean) => void;
+  private cache: Map<string, { data: unknown; timestamp: number }> = new Map();
+  private cacheEnabled: boolean = true;
+  private cacheTTL: number = 5 * 60 * 1000; // 5 minutes default TTL
+  private cacheHits: number = 0;
+  private cacheMisses: number = 0;
 
   public constructor(config: Partial<KanbanizeApiConfig> = {}) {
     this.apiKey = config.apiKey || process.env.KANBANIZE_API_KEY || "";
@@ -56,6 +61,88 @@ export class KanbanizeClient {
     } else {
       console.log(message);
     }
+  }
+
+  /**
+   * Enable or disable caching
+   */
+  public setCacheEnabled(enabled: boolean): void {
+    this.cacheEnabled = enabled;
+  }
+
+  /**
+   * Clear the cache
+   */
+  public clearCache(): void {
+    this.cache.clear();
+    this.cacheHits = 0;
+    this.cacheMisses = 0;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  public getCacheStats(): { hits: number; misses: number; size: number; hitRate: number } {
+    const total = this.cacheHits + this.cacheMisses;
+    return {
+      hits: this.cacheHits,
+      misses: this.cacheMisses,
+      size: this.cache.size,
+      hitRate: total > 0 ? this.cacheHits / total : 0,
+    };
+  }
+
+  /**
+   * Generate cache key for a request
+   */
+  private getCacheKey(endpoint: string, params?: Record<string, string | number | undefined>): string {
+    const sortedParams = params
+      ? Object.keys(params)
+          .sort()
+          .map(key => `${key}=${params[key]}`)
+          .join("&")
+      : "";
+    return `${endpoint}?${sortedParams}`;
+  }
+
+  /**
+   * Get cached response if available and not expired
+   */
+  private getCachedResponse<T>(cacheKey: string): T | null {
+    if (!this.cacheEnabled) {
+      return null;
+    }
+
+    const cached = this.cache.get(cacheKey);
+    if (!cached) {
+      this.cacheMisses++;
+      return null;
+    }
+
+    // Check if cache entry is expired
+    const now = Date.now();
+    if (now - cached.timestamp > this.cacheTTL) {
+      this.cache.delete(cacheKey);
+      this.cacheMisses++;
+      return null;
+    }
+
+    this.cacheHits++;
+    return cached.data as T;
+  }
+
+  /**
+   * Store response in cache
+   */
+  private setCachedResponse(cacheKey: string, data: unknown): void {
+    if (!this.cacheEnabled) {
+      return;
+    }
+
+    this.cache.set(cacheKey, {
+      data,
+      timestamp: Date.now(),
+    });
   }
 
   /**
@@ -126,6 +213,17 @@ export class KanbanizeClient {
     options: { method?: string; body?: unknown; params?: Record<string, string | number | undefined> } = {},
     retryCount = 0
   ): Promise<T> {
+    const method = options.method || "GET";
+
+    // Check cache for GET requests
+    if (method === "GET") {
+      const cacheKey = this.getCacheKey(endpoint, options.params);
+      const cachedResponse = this.getCachedResponse<T>(cacheKey);
+      if (cachedResponse) {
+        return cachedResponse;
+      }
+    }
+
     await this.waitForRateLimit();
 
     const url = new URL(`${this.baseUrl}${endpoint}`);
@@ -168,7 +266,15 @@ export class KanbanizeClient {
       throw new Error(`Kanbanize API error: ${response.status} ${response.statusText}\n${errorBody}`);
     }
 
-    return response.json() as Promise<T>;
+    const data = (await response.json()) as T;
+
+    // Cache GET requests
+    if (method === "GET") {
+      const cacheKey = this.getCacheKey(endpoint, options.params);
+      this.setCachedResponse(cacheKey, data);
+    }
+
+    return data;
   }
 
   /**
