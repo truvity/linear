@@ -86,17 +86,16 @@ export class KanbanizeExporter {
     const lanesMap: Record<number, KanbanizeLane> = {};
     lanes.forEach(l => (lanesMap[l.lane_id] = l));
 
-    // Fetch cards
-    console.log("Fetching cards...");
-    const cards = await this.client.getCards(boardId);
-    console.log(`Found ${cards.length} cards`);
-
     // Process each card (fetch comments, download attachments)
     const exportedCards: ExportedCard[] = [];
 
     // Simple progress tracking without cli-progress bar
-    const updateProgress = (current: number, total: number) => {
-      process.stdout.write(`\r\x1b[KProcessing cards: ${current}/${total}`);
+    let currentPhase = "cards";
+    let totalCards = 0;
+
+    const updateProgress = (current: number, total: number, phase: string = currentPhase) => {
+      const label = phase === "cards" ? "Fetching card details" : "Processing cards";
+      process.stdout.write(`\r\x1b[K${label}: ${current}/${total}`);
     };
 
     // Set up log callback to handle rate limit messages during progress
@@ -108,12 +107,22 @@ export class KanbanizeExporter {
 
       // If countdown is complete, show progress again
       if (isComplete) {
-        updateProgress(exportedCards.length, cards.length);
+        updateProgress(exportedCards.length || 0, totalCards, currentPhase);
       }
     });
 
-    // Show initial progress
-    updateProgress(0, cards.length);
+    // Fetch cards with full details (this now fetches each card individually)
+    console.log("Fetching cards...");
+    const cards = await this.client.getCards(boardId, (current, total) => {
+      totalCards = total;
+      updateProgress(current, total, "cards");
+    });
+    process.stdout.write("\n");
+    console.log(`Found ${cards.length} cards with full details`);
+
+    // Switch to processing phase
+    currentPhase = "processing";
+    updateProgress(0, cards.length, "processing");
 
     for (const card of cards) {
       // Fetch comments for this card
@@ -215,7 +224,7 @@ export class KanbanizeExporter {
       exportedCards.push(exportedCard);
 
       // Update progress counter
-      updateProgress(exportedCards.length, cards.length);
+      updateProgress(exportedCards.length, cards.length, "processing");
     }
 
     // Move to next line after progress is complete

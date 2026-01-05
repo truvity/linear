@@ -172,10 +172,10 @@ export class KanbanizeClient {
   }
 
   /**
-   * Get all cards for a board with pagination
+   * Get list of card IDs for a board (using the list endpoint which returns limited fields)
    */
-  public async getCards(boardId: number): Promise<KanbanizeCard[]> {
-    const allCards: KanbanizeCard[] = [];
+  private async getCardIds(boardId: number): Promise<number[]> {
+    const cardIds: number[] = [];
     let page = 1;
     const pageSize = 100;
     let hasMore = true;
@@ -184,22 +184,59 @@ export class KanbanizeClient {
       const response = await this.request<{
         data: {
           pagination: { all_pages: number; current_page: number; results_per_page: number };
-          data: KanbanizeCard[];
+          data: { card_id: number }[];
         };
       }>("/cards", {
         params: {
           board_ids: boardId,
           page,
           per_page: pageSize,
-          // Expand linked cards and attachments in the response
-          expand: "linked_cards,attachments",
         },
       });
 
       const cards = response.data.data;
-      allCards.push(...cards);
+      cardIds.push(...cards.map(c => c.card_id));
       hasMore = cards.length === pageSize;
       page++;
+    }
+
+    return cardIds;
+  }
+
+  /**
+   * Get a single card with full details
+   */
+  public async getCard(cardId: number): Promise<KanbanizeCard> {
+    const response = await this.request<{ data: KanbanizeCard }>(`/cards/${cardId}`);
+    return response.data;
+  }
+
+  /**
+   * Get all cards for a board with full details
+   * First fetches card IDs from the list endpoint, then fetches full details for each card
+   */
+  public async getCards(
+    boardId: number,
+    progressCallback?: (current: number, total: number) => void
+  ): Promise<KanbanizeCard[]> {
+    // First, get all card IDs from the list endpoint
+    const cardIds = await this.getCardIds(boardId);
+    const total = cardIds.length;
+
+    if (total === 0) {
+      return [];
+    }
+
+    // Then fetch full details for each card
+    const allCards: KanbanizeCard[] = [];
+    for (let i = 0; i < cardIds.length; i++) {
+      const cardId = cardIds[i];
+      const card = await this.getCard(cardId);
+      allCards.push(card);
+
+      if (progressCallback) {
+        progressCallback(i + 1, total);
+      }
     }
 
     return allCards;

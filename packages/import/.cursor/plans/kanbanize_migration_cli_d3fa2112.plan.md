@@ -48,8 +48,6 @@ flowchart LR
     end
 ```
 
-
-
 ## Part 1: Export Command
 
 Creates JSON export files and downloads attachments from Kanbanize. **Supports exporting multiple boards to separate files** for backup purposes - not all exported boards need to be imported.
@@ -94,8 +92,6 @@ The `metadata.json` contains:
   "version": "1.0"
 }
 ```
-
-
 
 ### Export Data Schema (`export.json`)
 
@@ -210,8 +206,6 @@ interface KanbanizeComment {
   }>;
 }
 ```
-
-
 
 ### Key Files to Create
 
