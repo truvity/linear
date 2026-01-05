@@ -23,7 +23,7 @@
   "scripts": {
     "cli": "ts-node src/cli",
     "cli:local": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cli --apiUrl https://local.linear.dev:8090/graphql",
-    "kanbanize": "ts-node src/kanbanize-cli",
+    "kanbanize": "tsx src/kanbanize-cli",
     "dev:import": "NODE_ENV=development pnpm run build:import",
     "build:import": "tsdown --clean --format cjs src/cli.ts",
     "build:kanbanize": "tsdown --clean --format cjs src/kanbanize-cli.ts",
