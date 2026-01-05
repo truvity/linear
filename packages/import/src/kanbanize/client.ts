@@ -62,7 +62,8 @@ export class KanbanizeClient {
    */
   private async request<T>(
     endpoint: string,
-    options: { method?: string; body?: unknown; params?: Record<string, string | number | undefined> } = {}
+    options: { method?: string; body?: unknown; params?: Record<string, string | number | undefined> } = {},
+    retryCount = 0
   ): Promise<T> {
     await this.waitForRateLimit();
 
@@ -88,6 +89,23 @@ export class KanbanizeClient {
 
     if (!response.ok) {
       const errorBody = await response.text();
+
+      // Handle rate limiting with retry
+      if (response.status === 429 && retryCount < 5) {
+        try {
+          const errorData = JSON.parse(errorBody);
+          const retryAfter = errorData.error?.details?.retry_after || 60;
+          console.log(`Rate limit hit. Retrying after ${retryAfter}s...`);
+          await new Promise(resolve => setTimeout(resolve, (retryAfter + 1) * 1000));
+          return this.request<T>(endpoint, options, retryCount + 1);
+        } catch {
+          // If parsing fails, wait and retry
+          console.log(`Rate limit hit. Retrying after 60s...`);
+          await new Promise(resolve => setTimeout(resolve, 61000));
+          return this.request<T>(endpoint, options, retryCount + 1);
+        }
+      }
+
       throw new Error(`Kanbanize API error: ${response.status} ${response.statusText}\n${errorBody}`);
     }
 
@@ -104,7 +122,12 @@ export class KanbanizeClient {
     let hasMore = true;
 
     while (hasMore) {
-      const response = await this.request<{ data: KanbanizeCard[] }>("/cards", {
+      const response = await this.request<{
+        data: {
+          pagination: { all_pages: number; current_page: number; results_per_page: number };
+          data: KanbanizeCard[];
+        };
+      }>("/cards", {
         params: {
           board_ids: boardId,
           page,
@@ -114,8 +137,9 @@ export class KanbanizeClient {
         },
       });
 
-      allCards.push(...response.data);
-      hasMore = response.data.length === pageSize;
+      const cards = response.data.data;
+      allCards.push(...cards);
+      hasMore = cards.length === pageSize;
       page++;
     }
 
@@ -134,25 +158,10 @@ export class KanbanizeClient {
    * Get all users
    */
   public async getUsers(): Promise<KanbanizeUser[]> {
-    const allUsers: KanbanizeUser[] = [];
-    let page = 1;
-    const pageSize = 100;
-    let hasMore = true;
-
-    while (hasMore) {
-      const response = await this.request<{ data: KanbanizeUser[] }>("/users", {
-        params: {
-          page,
-          per_page: pageSize,
-        },
-      });
-
-      allUsers.push(...response.data);
-      hasMore = response.data.length === pageSize;
-      page++;
-    }
-
-    return allUsers;
+    // Note: The /users endpoint does NOT support pagination in the response
+    // It returns { data: [...] } directly, not { data: { pagination, data } }
+    const response = await this.request<{ data: KanbanizeUser[] }>("/users");
+    return response.data;
   }
 
   /**

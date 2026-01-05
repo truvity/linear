@@ -214,7 +214,7 @@ export class KanbanizeExporter {
 
     // Create metadata
     const metadata: KanbanizeBoardMetadata = {
-      boardId: board.board_id,
+      boardId: boardId, // Use the boardId parameter, not board.board_id (which doesn't exist in API response)
       boardName: board.name,
       workspaceId: board.workspace_id,
       workspaceName: workspace?.name || "Unknown",
