@@ -2,7 +2,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import chalk from "chalk";
-import { Presets, SingleBar } from "cli-progress";
 import { KanbanizeClient } from "./client.ts";
 import type {
   ExportedAttachment,
@@ -94,11 +93,27 @@ export class KanbanizeExporter {
 
     // Process each card (fetch comments, download attachments)
     const exportedCards: ExportedCard[] = [];
-    const progressBar = new SingleBar(
-      { format: "Processing cards |{bar}| {percentage}% | {value}/{total}" },
-      Presets.shades_classic
-    );
-    progressBar.start(cards.length, 0);
+
+    // Simple progress tracking without cli-progress bar
+    const updateProgress = (current: number, total: number) => {
+      process.stdout.write(`\r\x1b[KProcessing cards: ${current}/${total}`);
+    };
+
+    // Set up log callback to handle rate limit messages during progress
+    this.client.setLogCallback((message: string, isComplete?: boolean) => {
+      // Clear line and write message (only if not empty)
+      if (message) {
+        process.stdout.write("\r\x1b[K" + message);
+      }
+
+      // If countdown is complete, show progress again
+      if (isComplete) {
+        updateProgress(exportedCards.length, cards.length);
+      }
+    });
+
+    // Show initial progress
+    updateProgress(0, cards.length);
 
     for (const card of cards) {
       // Fetch comments for this card
@@ -198,10 +213,16 @@ export class KanbanizeExporter {
       };
 
       exportedCards.push(exportedCard);
-      progressBar.increment();
+
+      // Update progress counter
+      updateProgress(exportedCards.length, cards.length);
     }
 
-    progressBar.stop();
+    // Move to next line after progress is complete
+    process.stdout.write("\n");
+
+    // Clear the log callback after processing is done
+    this.client.setLogCallback();
 
     // Create export data
     const exportData: KanbanizeBoardExport = {

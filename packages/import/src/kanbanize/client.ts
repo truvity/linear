@@ -27,6 +27,7 @@ export class KanbanizeClient {
   private apiKey: string;
   private baseUrl: string;
   private requestTimestamps: number[] = [];
+  private logCallback?: (message: string, isComplete?: boolean) => void;
 
   public constructor(config: Partial<KanbanizeApiConfig> = {}) {
     this.apiKey = config.apiKey || process.env.KANBANIZE_API_KEY || "";
@@ -36,6 +37,24 @@ export class KanbanizeClient {
       throw new Error(
         "Kanbanize API key is required. Set KANBANIZE_API_KEY environment variable or pass apiKey in config."
       );
+    }
+  }
+
+  /**
+   * Set a callback for log messages (useful for progress bar integration)
+   */
+  public setLogCallback(callback?: (message: string, isComplete?: boolean) => void): void {
+    this.logCallback = callback;
+  }
+
+  /**
+   * Log a message using the callback if available, otherwise use console.log
+   */
+  private log(message: string, isComplete?: boolean): void {
+    if (this.logCallback) {
+      this.logCallback(message, isComplete);
+    } else {
+      console.log(message);
     }
   }
 
@@ -50,11 +69,53 @@ export class KanbanizeClient {
     if (this.requestTimestamps.length >= RATE_LIMIT_PER_MINUTE) {
       const oldestTimestamp = this.requestTimestamps[0];
       const waitTime = RATE_LIMIT_WINDOW_MS - (now - oldestTimestamp) + 100; // Add 100ms buffer
-      console.log(`Rate limit reached. Waiting ${Math.ceil(waitTime / 1000)}s...`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      await this.waitWithCountdown(waitTime, "Rate limit reached");
     }
 
     this.requestTimestamps.push(Date.now());
+  }
+
+  /**
+   * Wait for a specified duration with a countdown timer
+   */
+  private async waitWithCountdown(waitTimeMs: number, reason: string): Promise<void> {
+    const startTime = Date.now();
+    const endTime = startTime + waitTimeMs;
+
+    // Update every second
+    const updateInterval = 1000;
+    let isFirstLog = true;
+
+    while (Date.now() < endTime) {
+      const remainingMs = endTime - Date.now();
+      const remainingSeconds = Math.ceil(remainingMs / 1000);
+
+      if (this.logCallback) {
+        // Using callback - let it handle the display
+        this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
+      } else {
+        // Using stdout directly - update same line
+        if (!isFirstLog) {
+          process.stdout.write("\r\x1b[K"); // Clear current line
+        }
+        process.stdout.write(`${reason}. Waiting ${remainingSeconds}s...`);
+        isFirstLog = false;
+      }
+
+      // Wait for the shorter of: update interval or remaining time
+      const sleepTime = Math.min(updateInterval, remainingMs);
+      if (sleepTime > 0) {
+        await new Promise(resolve => setTimeout(resolve, sleepTime));
+      }
+    }
+
+    // Signal completion
+    if (this.logCallback) {
+      // Just signal completion without additional message
+      this.log("", true);
+    } else {
+      process.stdout.write("\n");
+    }
   }
 
   /**
@@ -95,13 +156,11 @@ export class KanbanizeClient {
         try {
           const errorData = JSON.parse(errorBody);
           const retryAfter = errorData.error?.details?.retry_after || 60;
-          console.log(`Rate limit hit. Retrying after ${retryAfter}s...`);
-          await new Promise(resolve => setTimeout(resolve, (retryAfter + 1) * 1000));
+          await this.waitWithCountdown((retryAfter + 1) * 1000, "Rate limit hit. Retrying");
           return this.request<T>(endpoint, options, retryCount + 1);
         } catch {
           // If parsing fails, wait and retry
-          console.log(`Rate limit hit. Retrying after 60s...`);
-          await new Promise(resolve => setTimeout(resolve, 61000));
+          await this.waitWithCountdown(61000, "Rate limit hit. Retrying");
           return this.request<T>(endpoint, options, retryCount + 1);
         }
       }
