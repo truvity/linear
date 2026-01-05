@@ -256,16 +256,37 @@ export class KanbanizeClient {
   public async getUsers(): Promise<KanbanizeUser[]> {
     // Note: The /users endpoint does NOT support pagination in the response
     // It returns { data: [...] } directly, not { data: { pagination, data } }
-    const response = await this.request<{ data: KanbanizeUser[] }>("/users");
+    // Request email field explicitly along with other fields
+    const response = await this.request<{ data: KanbanizeUser[] }>("/users", {
+      params: {
+        fields: "user_id,email,username,realname,avatar",
+      },
+    });
     return response.data;
   }
 
   /**
    * Get all tags for a board
+   * First gets tag IDs available on the board, then fetches full tag details
    */
   public async getTags(boardId: number): Promise<KanbanizeTag[]> {
-    const response = await this.request<{ data: KanbanizeTag[] }>(`/boards/${boardId}/tags`);
-    return response.data;
+    // Get tag IDs available on this board
+    const boardTagsResponse = await this.request<{ data: { tag_id: number }[] }>(`/boards/${boardId}/tags`);
+
+    if (boardTagsResponse.data.length === 0) {
+      return [];
+    }
+
+    // Get full tag details for these tag IDs
+    const tagIds = boardTagsResponse.data.map(t => t.tag_id);
+    const tagsResponse = await this.request<{ data: KanbanizeTag[] }>("/tags", {
+      params: {
+        tag_ids: tagIds.join(","),
+        fields: "tag_id,label,color",
+      },
+    });
+
+    return tagsResponse.data;
   }
 
   /**

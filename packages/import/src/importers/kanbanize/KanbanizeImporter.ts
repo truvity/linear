@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import * as fs from "fs";
 import * as path from "path";
 import type { Comment, Importer, ImportResult, IssuePriority, IssueStatus } from "../../types.ts";
@@ -180,7 +181,16 @@ export class KanbanizeImporter implements Importer {
         const isMigrated = this.migratedCardIds.has(link.card_id);
         const marker = isMigrated ? "*(migrated)*" : "*(not migrated)*";
 
-        return `- [${title}](${url}) ${marker}`;
+        // Get the status (column name) of the linked card
+        let statusInfo = "";
+        if (linkedCard) {
+          const column = this.exportData.columns[linkedCard.column_id];
+          if (column) {
+            statusInfo = ` [${column.name}]`;
+          }
+        }
+
+        return `- [${title}](${url})${statusInfo} ${marker}`;
       });
 
       sections.push(`**${label}:**\n${items.join("\n")}`);
@@ -194,14 +204,28 @@ export class KanbanizeImporter implements Importer {
   }
 
   /**
+   * Convert relative inline image URLs to absolute URLs
+   */
+  private fixInlineImageUrls(markdown: string): string {
+    // Convert relative /inlineImages/ paths to absolute URLs
+    // Matches: ![...](/inlineImages/...)
+    return markdown.replace(
+      /!\[([^\]]*)\]\(\/inlineImages\/([^)]+)\)/g,
+      `![$1](${KANBANIZE_BASE_URL}/inlineImages/$2)`
+    );
+  }
+
+  /**
    * Build the full description for a card
    */
   private buildDescription(card: ExportedCard): string {
     const parts: string[] = [];
 
     // Original description converted to Markdown
-    const mdDescription = htmlToMarkdown(card.description);
+    let mdDescription = htmlToMarkdown(card.description);
     if (mdDescription) {
+      // Fix relative inline image URLs
+      mdDescription = this.fixInlineImageUrls(mdDescription);
       parts.push(mdDescription);
     }
 
@@ -227,10 +251,15 @@ export class KanbanizeImporter implements Importer {
   private convertComments(card: ExportedCard): Comment[] {
     return card.comments.map(comment => {
       const user = this.exportData.users[comment.author_user_id];
-      const userId = user?.email || user?.username || String(comment.author_user_id);
+      // Use user_id as userId
+      const userId = user ? String(user.user_id) : String(comment.author_user_id);
+
+      // Convert comment text to Markdown and fix inline image URLs
+      let commentBody = htmlToMarkdown(comment.text);
+      commentBody = this.fixInlineImageUrls(commentBody);
 
       return {
-        body: htmlToMarkdown(comment.text),
+        body: commentBody,
         userId,
         createdAt: new Date(comment.created_at),
       };
@@ -257,37 +286,96 @@ export class KanbanizeImporter implements Importer {
       statuses: {},
     };
 
-    // Build users map
-    for (const [id, user] of Object.entries(this.exportData.users)) {
-      const userId = user.email || user.username || id;
-      importData.users[userId] = {
+    // Collect used user IDs, tag IDs, and status names from filtered cards
+    const usedUserIds = new Set<number>();
+    const usedTagIds = new Set<number>();
+    const usedStatusNames = new Set<string>();
+
+    // First pass: collect what's actually used
+    for (const card of filteredCards) {
+      // Collect owner
+      if (card.owner_user_id) {
+        usedUserIds.add(card.owner_user_id);
+      }
+
+      // Collect co-owners
+      if (card.co_owner_ids && card.co_owner_ids.length > 0) {
+        card.co_owner_ids.forEach(id => usedUserIds.add(id));
+      }
+
+      // Collect comment authors
+      if (card.comments && card.comments.length > 0) {
+        card.comments.forEach(comment => {
+          if (comment.author_user_id) {
+            usedUserIds.add(comment.author_user_id);
+          }
+        });
+      }
+
+      // Collect tags
+      if (card.tag_ids && card.tag_ids.length > 0) {
+        card.tag_ids.forEach(tagId => usedTagIds.add(tagId));
+      }
+
+      // Collect status
+      const statusName = this.getStatusName(card);
+      usedStatusNames.add(statusName);
+    }
+
+    // Build users map (only used users)
+    for (const userId of usedUserIds) {
+      const user = this.exportData.users[userId];
+      if (!user) {continue;}
+
+      // Skip users without email - they must be fetched from Kanbanize API
+      if (!user.email) {
+        console.warn(
+          `Warning: User ${user.user_id} (${user.realname || user.username}) has no email address. Skipping.`
+        );
+        continue;
+      }
+
+      // Use user_id as the key, not username
+      const userKey = String(user.user_id);
+
+      // Convert relative avatar URL to absolute URL
+      let avatarUrl: string | undefined;
+      if (user.avatar) {
+        avatarUrl = user.avatar.startsWith("http") ? user.avatar : `${KANBANIZE_BASE_URL}${user.avatar}`;
+      }
+
+      importData.users[userKey] = {
         name: user.realname || user.username,
         email: user.email,
-        avatarUrl: user.avatar,
+        avatarUrl,
       };
     }
 
-    // Build labels from tags
-    for (const [id, tag] of Object.entries(this.exportData.tags)) {
-      importData.labels[id] = {
+    // Build labels from tags (only used tags)
+    for (const tagId of usedTagIds) {
+      const tag = this.exportData.tags[tagId];
+      if (!tag) {continue;}
+
+      importData.labels[String(tagId)] = {
         name: tag.label,
         color: tag.color ? `#${tag.color}` : undefined,
       };
     }
 
-    // Build statuses from columns
-    const statusesSet = new Set<string>();
-    for (const column of Object.values(this.exportData.columns) as KanbanizeColumn[]) {
-      const statusName = this.statusMapping?.[column.name] || column.name;
-      if (!statusesSet.has(statusName)) {
-        statusesSet.add(statusName);
-        if (importData.statuses) {
-          importData.statuses[statusName] = {
-            name: statusName,
-            color: column.color ? `#${column.color}` : undefined,
-            type: SECTION_TO_STATUS_TYPE[column.section],
-          };
-        }
+    // Build statuses (only used statuses)
+    for (const statusName of usedStatusNames) {
+      // Find the column that matches this status name
+      const column = Object.values(this.exportData.columns).find(col => {
+        const mappedName = this.statusMapping?.[col.name] || col.name;
+        return mappedName === statusName;
+      }) as KanbanizeColumn | undefined;
+
+      if (column && importData.statuses) {
+        importData.statuses[statusName] = {
+          name: statusName,
+          color: column.color ? `#${column.color}` : undefined,
+          type: SECTION_TO_STATUS_TYPE[column.section],
+        };
       }
     }
 
@@ -295,13 +383,29 @@ export class KanbanizeImporter implements Importer {
     for (const card of filteredCards) {
       const column = this.exportData.columns[card.column_id];
       const user = card.owner_user_id ? this.exportData.users[card.owner_user_id] : null;
-      const assigneeId = user ? user.email || user.username || String(card.owner_user_id) : undefined;
+      // Use user_id as assigneeId
+      const assigneeId = user ? String(user.user_id) : undefined;
 
       // Convert tags to label IDs
       const labels = card.tag_ids.map(tagId => String(tagId));
 
       // Determine if card should be archived (section 5 = Archive)
       const isArchived = column?.section === 5;
+
+      // Get status type for this card
+      const statusType = this.getStatusType(card);
+
+      // Only set completedAt if status type is "completed" or "canceled"
+      const completedAt =
+        (statusType === "completed" || statusType === "canceled") && card.first_end_time
+          ? new Date(card.first_end_time)
+          : undefined;
+
+      // Only set startedAt if status type is "started", "completed", or "canceled"
+      const startedAt =
+        (statusType === "started" || statusType === "completed" || statusType === "canceled") && card.first_start_time
+          ? new Date(card.first_start_time)
+          : undefined;
 
       importData.issues.push({
         title: card.title,
@@ -314,8 +418,8 @@ export class KanbanizeImporter implements Importer {
         url: `${KANBANIZE_BASE_URL}/ctrl_board/${this.metadata.boardId}/cards/${card.card_id}`,
         createdAt: new Date(card.created_at),
         dueDate: card.deadline ? new Date(card.deadline) : undefined,
-        completedAt: card.first_end_time ? new Date(card.first_end_time) : undefined,
-        startedAt: card.first_start_time ? new Date(card.first_start_time) : undefined,
+        completedAt,
+        startedAt,
         archived: isArchived,
         estimate: card.size ?? undefined,
       });

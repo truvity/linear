@@ -12,9 +12,9 @@
 export interface KanbanizeUser {
   user_id: number;
   username: string;
-  email: string;
+  email?: string;
   realname: string;
-  avatar?: string;
+  avatar?: string | null;
 }
 
 export interface KanbanizeTag {

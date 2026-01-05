@@ -233,10 +233,62 @@ export class KanbanizeExporter {
     // Clear the log callback after processing is done
     this.client.setLogCallback();
 
+    // Collect used user IDs and tag IDs
+    const usedUserIds = new Set<number>();
+    const usedTagIds = new Set<number>();
+
+    for (const card of exportedCards) {
+      // Collect owner
+      if (card.owner_user_id) {
+        usedUserIds.add(card.owner_user_id);
+      }
+
+      // Collect co-owners
+      if (card.co_owner_ids && card.co_owner_ids.length > 0) {
+        card.co_owner_ids.forEach(id => usedUserIds.add(id));
+      }
+
+      // Collect comment authors
+      if (card.comments && card.comments.length > 0) {
+        card.comments.forEach(comment => {
+          if (comment.author_user_id) {
+            usedUserIds.add(comment.author_user_id);
+          }
+        });
+      }
+
+      // Collect tags
+      if (card.tag_ids && card.tag_ids.length > 0) {
+        card.tag_ids.forEach(tagId => usedTagIds.add(tagId));
+      }
+    }
+
+    // Filter users to only include used ones
+    const filteredUsersMap: Record<number, KanbanizeUser> = {};
+    for (const userId of usedUserIds) {
+      if (usersMap[userId]) {
+        filteredUsersMap[userId] = usersMap[userId];
+      }
+    }
+
+    // Filter tags to only include used ones
+    const filteredTagsMap: Record<number, KanbanizeTag> = {};
+    for (const tagId of usedTagIds) {
+      if (tagsMap[tagId]) {
+        filteredTagsMap[tagId] = tagsMap[tagId];
+      }
+    }
+
+    console.log(
+      chalk.gray(
+        `Filtered to ${usedUserIds.size} users (from ${Object.keys(usersMap).length}) and ${usedTagIds.size} tags (from ${Object.keys(tagsMap).length})`
+      )
+    );
+
     // Create export data
     const exportData: KanbanizeBoardExport = {
-      users: usersMap,
-      tags: tagsMap,
+      users: filteredUsersMap,
+      tags: filteredTagsMap,
       columns: columnsMap,
       lanes: lanesMap,
       cards: exportedCards,
