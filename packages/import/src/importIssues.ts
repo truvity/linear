@@ -357,36 +357,40 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
         continue;
       }
 
-      // Create parent relationships (as 'related' in Linear)
+      // Create parent relationship (as sub-issue in Linear)
       if (issue.parentIds && issue.parentIds.length > 0) {
-        for (const parentSourceId of issue.parentIds) {
-          const parentId = sourceIdToLinearId.get(parentSourceId);
-          if (parentId) {
-            try {
-              await client.createIssueRelation({
-                issueId,
-                relatedIssueId: parentId,
-                type: IssueRelationType.Related,
-              });
-              relationshipsCreated++;
-            } catch (error) {
-              relationshipsFailed++;
-              console.warn(`Warning: Failed to create parent relationship for issue ${issueId}:`, error);
+        // Linear only supports one parent per issue, so use the first one
+        const parentSourceId = issue.parentIds[0];
+        const parentId = sourceIdToLinearId.get(parentSourceId);
+
+        if (parentId) {
+          try {
+            await client.updateIssue(issueId, {
+              parentId: parentId,
+            });
+            relationshipsCreated++;
+
+            // Warn if there are additional parents that cannot be linked
+            if (issue.parentIds.length > 1) {
+              console.warn(
+                `Warning: Issue ${issueId} has ${issue.parentIds.length} parents in Kanbanize, but Linear only supports one parent. Using first parent only.`
+              );
             }
+          } catch (error) {
+            relationshipsFailed++;
+            console.warn(`Warning: Failed to create parent relationship for issue ${issueId}:`, error);
           }
         }
       }
 
-      // Create child relationships (as 'related' in Linear)
+      // Create child relationships (as sub-issues in Linear)
       if (issue.childIds && issue.childIds.length > 0) {
         for (const childSourceId of issue.childIds) {
           const childId = sourceIdToLinearId.get(childSourceId);
           if (childId) {
             try {
-              await client.createIssueRelation({
-                issueId,
-                relatedIssueId: childId,
-                type: IssueRelationType.Related,
+              await client.updateIssue(childId, {
+                parentId: issueId,
               });
               relationshipsCreated++;
             } catch (error) {

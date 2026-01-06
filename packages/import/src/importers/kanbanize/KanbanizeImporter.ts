@@ -174,11 +174,11 @@ export class KanbanizeImporter implements Importer {
 
       switch (link.link_type) {
         case "parent":
-          // Parent relationship - will be linked as 'related' in Linear
+          // Parent relationship - current card becomes sub-issue of parent in Linear
           parentIds.push(linkId);
           break;
         case "child":
-          // Child relationship - will be linked as 'related' in Linear
+          // Child relationship - will be linked as sub-issue in Linear
           childIds.push(linkId);
           break;
         case "relative":

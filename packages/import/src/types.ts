@@ -37,9 +37,9 @@ export interface Issue {
     fileName: string;
     filePath: string;
   }[];
-  /** Parent issue source IDs (to be linked as 'related') */
+  /** Parent issue source IDs (current issue becomes sub-issue of parent) */
   parentIds?: string[];
-  /** Child issue source IDs (to be linked as 'related') */
+  /** Child issue source IDs (to be linked as sub-issues) */
   childIds?: string[];
   /** Related issue source IDs (to be linked as 'related') */
   relatedIds?: string[];
