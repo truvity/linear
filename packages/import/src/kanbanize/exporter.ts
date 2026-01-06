@@ -2,6 +2,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import chalk from "chalk";
+import cliProgress from "cli-progress";
 import { KanbanizeClient } from "./client.ts";
 import type {
   ExportedAttachment,
@@ -26,9 +27,39 @@ import type {
 export class KanbanizeExporter {
   private client: KanbanizeClient;
   private workspaces: Map<number, KanbanizeWorkspace> = new Map();
+  private activeProgressBars: (cliProgress.MultiBar | cliProgress.SingleBar)[] = [];
+  private cleanupHandlerInstalled = false;
 
   public constructor(client?: KanbanizeClient) {
     this.client = client || new KanbanizeClient();
+  }
+
+  /**
+   * Install cleanup handler for Ctrl+C
+   */
+  private installCleanupHandler(): void {
+    if (this.cleanupHandlerInstalled) {
+      return;
+    }
+
+    const cleanup = () => {
+      // Stop all active progress bars
+      for (const bar of this.activeProgressBars) {
+        try {
+          bar.stop();
+        } catch {
+          // Ignore errors during cleanup
+        }
+      }
+      this.activeProgressBars = [];
+
+      console.log(chalk.yellow("\n\nExport cancelled by user"));
+      process.exit(130); // Standard exit code for SIGINT
+    };
+
+    process.on("SIGINT", cleanup);
+    process.on("SIGTERM", cleanup);
+    this.cleanupHandlerInstalled = true;
   }
 
   /**
@@ -49,7 +80,7 @@ export class KanbanizeExporter {
   /**
    * Download inline images and replace URLs with base64 data URIs
    */
-  private async processInlineImages(html: string, cardId: number): Promise<string> {
+  private async processInlineImages(html: string, cardId: number, warnings?: string[]): Promise<string> {
     const inlineImages = this.extractInlineImages(html);
 
     if (inlineImages.length === 0) {
@@ -67,7 +98,9 @@ export class KanbanizeExporter {
         // Replace the URL in the HTML
         processedHtml = processedHtml.replace(new RegExp(imageUrl, "g"), dataUri);
       } catch (error) {
-        console.warn(`\nWarning: Failed to download inline image ${imageUrl} for card ${cardId}: ${error}`);
+        if (warnings) {
+          warnings.push(`Failed to download inline image ${imageUrl} for card ${cardId}: ${error}`);
+        }
         // Leave the original URL if download fails
       }
     }
@@ -113,25 +146,118 @@ export class KanbanizeExporter {
    * Export a single board to its own directory
    */
   private async exportBoard(boardId: number, baseOutputDir: string): Promise<void> {
+    // Install cleanup handler for Ctrl+C
+    this.installCleanupHandler();
+
     const boardDir = path.join(baseOutputDir, `board-${boardId}`);
     const attachmentsDir = path.join(boardDir, "attachments");
 
     console.log(chalk.cyan(`\n━━━ Board ${boardId} ━━━`));
 
-    // Fetch board metadata
-    console.log("Fetching board metadata...");
+    // Create a single MultiBar for the entire export process
+    const multibar = new cliProgress.MultiBar(
+      {
+        clearOnComplete: false,
+        hideCursor: true,
+        autopadding: true,
+      },
+      cliProgress.Presets.shades_classic
+    );
+    this.activeProgressBars.push(multibar);
+
+    // Create a status bar at the top for rate limit messages (always visible)
+    const statusBar = multibar.create(
+      1,
+      1,
+      { text: "" },
+      {
+        format: "{text}",
+        barCompleteChar: " ",
+        barIncompleteChar: " ",
+        hideCursor: true,
+      }
+    );
+
+    // Set status bar for client to use during retries for ALL requests
+    this.client.setProgressBar(statusBar);
+
+    // Fetch board metadata with progress bar
+    const metadataBar = multibar.create(
+      1,
+      0,
+      {},
+      { format: "Board metadata     [{bar}] {percentage}% | {value}/{total}" }
+    );
+
     const board = await this.client.getBoard(boardId);
+    metadataBar.update(1);
+    metadataBar.stop();
+
     const workspace = this.workspaces.get(board.workspace_id);
 
-    // Fetch reference data
-    console.log("Fetching reference data (users, tags, columns, lanes, workflows)...");
+    // Fetch reference data with progress bars
+    // Create progress bars for each operation
+    const usersBar = multibar.create(
+      1,
+      0,
+      { operation: "Users             " },
+      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
+    );
+    const tagsBar = multibar.create(
+      1,
+      0,
+      { operation: "Tags              " },
+      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
+    );
+    const columnsBar = multibar.create(
+      1,
+      0,
+      { operation: "Columns           " },
+      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
+    );
+    const lanesBar = multibar.create(
+      1,
+      0,
+      { operation: "Lanes             " },
+      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
+    );
+    const workflowsBar = multibar.create(
+      1,
+      0,
+      { operation: "Workflows         " },
+      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
+    );
+
+    // Fetch all reference data in parallel with progress tracking
     const [users, tags, columns, lanes, workflows] = await Promise.all([
-      this.client.getUsers(),
-      this.client.getTags(boardId),
-      this.client.getColumns(boardId),
-      this.client.getLanes(boardId),
-      this.client.getWorkflows(boardId),
+      this.client.getUsers().then(result => {
+        usersBar.update(1);
+        return result;
+      }),
+      this.client.getTags(boardId).then(result => {
+        tagsBar.update(1);
+        return result;
+      }),
+      this.client.getColumns(boardId).then(result => {
+        columnsBar.update(1);
+        return result;
+      }),
+      this.client.getLanes(boardId).then(result => {
+        lanesBar.update(1);
+        return result;
+      }),
+      this.client.getWorkflows(boardId).then(result => {
+        workflowsBar.update(1);
+        return result;
+      }),
     ]);
+
+    // Stop individual reference data bars
+    usersBar.stop();
+    tagsBar.stop();
+    columnsBar.stop();
+    lanesBar.stop();
+    workflowsBar.stop();
 
     // Create lookup maps
     const usersMap: Record<number, KanbanizeUser> = {};
@@ -152,41 +278,32 @@ export class KanbanizeExporter {
     // Process each card (fetch comments, download attachments)
     const exportedCards: ExportedCard[] = [];
 
-    // Simple progress tracking without cli-progress bar
-    let currentPhase = "cards";
-    let lastProgressMessage = "";
+    // Fetch cards with progress bar
+    // Get card IDs first to know the total
+    const cardIds = await this.client.getCardIdsList(boardId);
+    const cardsProgressBar = multibar.create(
+      cardIds.length,
+      0,
+      {},
+      { format: "Fetching cards     [{bar}] {percentage}% | {value}/{total}" }
+    );
 
-    const updateProgress = (current: number, total: number, phase: string = currentPhase) => {
-      const label = phase === "cards" ? "Fetching card details" : "Processing cards";
-      lastProgressMessage = `${label}: ${current}/${total}`;
-      process.stdout.write(`\r\x1b[K${lastProgressMessage}`);
-    };
-
-    // Set up log callback to handle rate limit messages during progress
-    this.client.setLogCallback((message: string, isComplete?: boolean) => {
-      if (message) {
-        // Show progress + rate limit message on the same line
-        const fullMessage = lastProgressMessage ? `${lastProgressMessage} - ${message}` : message;
-        process.stdout.write(`\r\x1b[K${fullMessage}`);
-      }
-
-      // If countdown is complete, restore the last progress message (without the rate limit suffix)
-      if (isComplete && lastProgressMessage) {
-        process.stdout.write(`\r\x1b[K${lastProgressMessage}`);
-      }
+    const cards = await this.client.getCards(boardId, current => {
+      cardsProgressBar.update(current);
     });
 
-    // Fetch cards with full details (this now fetches each card individually)
-    console.log("Fetching cards...");
-    const cards = await this.client.getCards(boardId, (current, total) => {
-      updateProgress(current, total, "cards");
-    });
-    process.stdout.write("\n");
-    console.log(`Found ${cards.length} cards with full details`);
+    cardsProgressBar.stop();
 
-    // Switch to processing phase
-    currentPhase = "processing";
-    updateProgress(0, cards.length, "processing");
+    // Processing phase with progress bar
+    const processingBar = multibar.create(
+      cards.length,
+      0,
+      {},
+      { format: "Processing cards   [{bar}] {percentage}% | {value}/{total}" }
+    );
+
+    // Collect warnings to display after progress bars are stopped
+    const warnings: string[] = [];
 
     // Cache for linked card details (to avoid fetching the same card multiple times)
     const linkedCardCache = new Map<number, { title: string; board_id: number; column_name?: string }>();
@@ -211,7 +328,7 @@ export class KanbanizeExporter {
               local_path: localPath,
             });
           } catch (error) {
-            console.warn(`\nWarning: Failed to download attachment ${attachment.file_name}: ${error}`);
+            warnings.push(`Failed to download attachment ${attachment.file_name}: ${error}`);
             // Still record the attachment but mark local_path as empty
             exportedAttachments.push({
               id: attachment.id,
@@ -241,7 +358,7 @@ export class KanbanizeExporter {
                 local_path: localPath,
               });
             } catch (error) {
-              console.warn(`\nWarning: Failed to download comment attachment ${attachment.file_name}: ${error}`);
+              warnings.push(`Failed to download comment attachment ${attachment.file_name}: ${error}`);
               commentAttachments.push({
                 id: attachment.id,
                 file_name: attachment.file_name,
@@ -252,7 +369,7 @@ export class KanbanizeExporter {
         }
 
         // Process inline images in comment text
-        const processedCommentText = await this.processInlineImages(comment.text, card.card_id);
+        const processedCommentText = await this.processInlineImages(comment.text, card.card_id, warnings);
 
         exportedComments.push({
           comment_id: comment.comment_id,
@@ -288,7 +405,7 @@ export class KanbanizeExporter {
               });
             } catch (error) {
               // If we can't fetch the card details, skip enrichment
-              console.warn(`\nWarning: Failed to fetch details for linked card ${link.card_id}: ${error}`);
+              warnings.push(`Failed to fetch details for linked card ${link.card_id}: ${error}`);
             }
           }
 
@@ -304,7 +421,7 @@ export class KanbanizeExporter {
       }
 
       // Process inline images in card description
-      const processedDescription = await this.processInlineImages(card.description || "", card.card_id);
+      const processedDescription = await this.processInlineImages(card.description || "", card.card_id, warnings);
 
       // Build exported card
       const exportedCard: ExportedCard = {
@@ -337,14 +454,11 @@ export class KanbanizeExporter {
       exportedCards.push(exportedCard);
 
       // Update progress counter
-      updateProgress(exportedCards.length, cards.length, "processing");
+      processingBar.update(exportedCards.length);
     }
 
-    // Move to next line after progress is complete
-    process.stdout.write("\n");
-
-    // Clear the log callback after processing is done
-    this.client.setLogCallback();
+    // Stop the processing bar
+    processingBar.stop();
 
     // Collect used user IDs and tag IDs
     const usedUserIds = new Set<number>();
@@ -392,12 +506,6 @@ export class KanbanizeExporter {
       }
     }
 
-    console.log(
-      chalk.gray(
-        `Filtered to ${usedUserIds.size} users (from ${Object.keys(usersMap).length}) and ${usedTagIds.size} tags (from ${Object.keys(tagsMap).length})`
-      )
-    );
-
     // Create export data
     const exportData: KanbanizeBoardExport = {
       users: filteredUsersMap,
@@ -427,14 +535,12 @@ export class KanbanizeExporter {
     // Write export.json
     const exportPath = path.join(boardDir, "export.json");
     fs.writeFileSync(exportPath, JSON.stringify(exportData, null, 2));
-    console.log(chalk.green(`✓ Saved export.json (${exportedCards.length} cards)`));
 
     // Write metadata.json
     const metadataPath = path.join(boardDir, "metadata.json");
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
-    console.log(chalk.green(`✓ Saved metadata.json`));
 
-    // Report attachments status
+    // Calculate attachment statistics
     const totalAttachments = exportedCards.reduce(
       (sum, card) => sum + card.attachments.length + card.comments.reduce((cSum, c) => cSum + c.attachments.length, 0),
       0
@@ -447,12 +553,27 @@ export class KanbanizeExporter {
       0
     );
 
+    // Get cache statistics
+    const cacheStats = this.client.getCacheStats();
+
+    // Clean up MultiBar and all progress bars
+    multibar.stop();
+    this.activeProgressBars = this.activeProgressBars.filter(bar => bar !== multibar);
+    this.client.setProgressBar(undefined);
+
+    // Display all results after multibar is stopped
+    console.log(
+      chalk.gray(
+        `Filtered to ${usedUserIds.size} users (from ${Object.keys(usersMap).length}) and ${usedTagIds.size} tags (from ${Object.keys(tagsMap).length})`
+      )
+    );
+    console.log(chalk.green(`✓ Saved export.json (${exportedCards.length} cards)`));
+    console.log(chalk.green(`✓ Saved metadata.json`));
+
     if (totalAttachments > 0) {
       console.log(chalk.green(`✓ Downloaded ${downloadedAttachments}/${totalAttachments} attachments`));
     }
 
-    // Report cache statistics
-    const cacheStats = this.client.getCacheStats();
     if (cacheStats.hits + cacheStats.misses > 0) {
       const hitRatePercent = (cacheStats.hitRate * 100).toFixed(1);
       console.log(
@@ -460,6 +581,12 @@ export class KanbanizeExporter {
           `Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${hitRatePercent}% hit rate, ${cacheStats.size} entries)`
         )
       );
+    }
+
+    // Display warnings if any occurred
+    if (warnings.length > 0) {
+      console.log(chalk.yellow(`\n⚠ ${warnings.length} warning(s) occurred during export:`));
+      warnings.forEach(warning => console.log(chalk.yellow(`  - ${warning}`)));
     }
   }
 }

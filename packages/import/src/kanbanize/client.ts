@@ -1,7 +1,8 @@
-/* eslint-disable no-console */
+ 
 import fetch from "node-fetch";
 import * as fs from "fs";
 import * as path from "path";
+import type { SingleBar } from "cli-progress";
 import type {
   KanbanizeApiConfig,
   KanbanizeBoard,
@@ -28,7 +29,7 @@ export class KanbanizeClient {
   private apiKey: string;
   private baseUrl: string;
   private requestTimestamps: number[] = [];
-  private logCallback?: (message: string, isComplete?: boolean) => void;
+  private progressBar?: SingleBar;
   private cache: Map<string, { data: unknown; timestamp: number }> = new Map();
   private cacheEnabled: boolean = true;
   private cacheTTL: number = 5 * 60 * 1000; // 5 minutes default TTL
@@ -50,19 +51,11 @@ export class KanbanizeClient {
   /**
    * Set a callback for log messages (useful for progress bar integration)
    */
-  public setLogCallback(callback?: (message: string, isComplete?: boolean) => void): void {
-    this.logCallback = callback;
-  }
-
   /**
-   * Log a message using the callback if available, otherwise use console.log
+   * Set a progress bar to use for displaying retry countdowns
    */
-  private log(message: string, isComplete?: boolean): void {
-    if (this.logCallback) {
-      this.logCallback(message, isComplete);
-    } else {
-      console.log(message);
-    }
+  public setProgressBar(progressBar?: SingleBar): void {
+    this.progressBar = progressBar;
   }
 
   /**
@@ -191,10 +184,9 @@ export class KanbanizeClient {
       const remainingMs = endTime - Date.now();
       const remainingSeconds = Math.ceil(remainingMs / 1000);
 
-      if (this.logCallback) {
-        // Using callback - update every second so countdown is visible
-        // The exporter's callback handles clearing the line with \r\x1b[K
-        this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
+      if (this.progressBar) {
+        // Using progress bar - update the text token with countdown
+        this.progressBar.update({ text: `${reason}. Waiting ${remainingSeconds}s...` });
       } else {
         // Using stdout directly - update same line
         if (!isFirstLog) {
@@ -212,9 +204,9 @@ export class KanbanizeClient {
     }
 
     // Signal completion
-    if (this.logCallback) {
-      // Just signal completion without additional message
-      this.log("", true);
+    if (this.progressBar) {
+      // Clear the text token
+      this.progressBar.update({ text: "" });
     } else {
       process.stdout.write("\n");
     }
@@ -269,11 +261,11 @@ export class KanbanizeClient {
         try {
           const errorData = JSON.parse(errorBody);
           const retryAfter = errorData.error?.details?.retry_after || 60;
-          await this.waitWithCountdown((retryAfter + 1) * 1000, "Rate limit hit. Retrying");
+          await this.waitWithCountdown((retryAfter + 1) * 1000, "Rate limit reached");
           return this.request<T>(endpoint, options, retryCount + 1);
         } catch {
           // If parsing fails, wait and retry
-          await this.waitWithCountdown(61000, "Rate limit hit. Retrying");
+          await this.waitWithCountdown(61000, "Rate limit reached");
           return this.request<T>(endpoint, options, retryCount + 1);
         }
       }
@@ -294,6 +286,13 @@ export class KanbanizeClient {
 
   /**
    * Get list of card IDs for a board (using the list endpoint which returns limited fields)
+   */
+  public async getCardIdsList(boardId: number): Promise<number[]> {
+    return this.getCardIds(boardId);
+  }
+
+  /**
+   * Internal method to get list of card IDs for a board
    */
   private async getCardIds(boardId: number): Promise<number[]> {
     const cardIds: number[] = [];
