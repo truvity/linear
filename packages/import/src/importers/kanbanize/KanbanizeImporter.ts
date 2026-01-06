@@ -448,6 +448,13 @@ export class KanbanizeImporter implements Importer {
       };
     }
 
+    // Add "initiative" label for Initiatives workflow cards
+    importData.labels.initiative = {
+      name: "initiative",
+      color: "#5E6AD2", // Linear's purple color
+      description: "Card from Kanbanize Initiatives workflow",
+    };
+
     // Build statuses (only used statuses)
     for (const statusName of usedStatusNames) {
       // Find the column that matches this status name
@@ -474,6 +481,12 @@ export class KanbanizeImporter implements Importer {
 
       // Convert tags to label IDs
       const labels = card.tag_ids.map(tagId => String(tagId));
+
+      // Add "initiative" label if card is from Initiatives workflow (type 1)
+      const workflow = this.exportData.workflows[card.workflow_id];
+      if (workflow && workflow.type === 1) {
+        labels.push("initiative");
+      }
 
       // Determine if card should be archived (section 5 = Archive)
       const isArchived = column?.section === 5;
