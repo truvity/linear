@@ -105,30 +105,31 @@ export class KanbanizeExporter {
 
     // Simple progress tracking without cli-progress bar
     let currentPhase = "cards";
-    let totalCards = 0;
+    let lastProgressMessage = "";
 
     const updateProgress = (current: number, total: number, phase: string = currentPhase) => {
       const label = phase === "cards" ? "Fetching card details" : "Processing cards";
-      process.stdout.write(`\r\x1b[K${label}: ${current}/${total}`);
+      lastProgressMessage = `${label}: ${current}/${total}`;
+      process.stdout.write(`\r\x1b[K${lastProgressMessage}`);
     };
 
     // Set up log callback to handle rate limit messages during progress
     this.client.setLogCallback((message: string, isComplete?: boolean) => {
-      // Clear line and write message (only if not empty)
       if (message) {
-        process.stdout.write("\r\x1b[K" + message);
+        // Show progress + rate limit message on the same line
+        const fullMessage = lastProgressMessage ? `${lastProgressMessage} - ${message}` : message;
+        process.stdout.write(`\r\x1b[K${fullMessage}`);
       }
 
-      // If countdown is complete, show progress again
-      if (isComplete) {
-        updateProgress(exportedCards.length || 0, totalCards, currentPhase);
+      // If countdown is complete, restore the last progress message (without the rate limit suffix)
+      if (isComplete && lastProgressMessage) {
+        process.stdout.write(`\r\x1b[K${lastProgressMessage}`);
       }
     });
 
     // Fetch cards with full details (this now fetches each card individually)
     console.log("Fetching cards...");
     const cards = await this.client.getCards(boardId, (current, total) => {
-      totalCards = total;
       updateProgress(current, total, "cards");
     });
     process.stdout.write("\n");
