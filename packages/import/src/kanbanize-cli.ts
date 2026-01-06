@@ -8,6 +8,9 @@ import { kanbanizeImport } from "./importers/kanbanize/index.ts";
 import { importIssues } from "./importIssues.ts";
 import type { ExportOptions } from "./kanbanize/types.ts";
 
+// Default export directory
+const DEFAULT_EXPORT_DIR = "./kanbanize-export";
+
 const program = new Command();
 
 program.name("kanbanize-migration").description("CLI tool for migrating from Kanbanize to Linear").version("1.0.0");
@@ -18,8 +21,8 @@ program.name("kanbanize-migration").description("CLI tool for migrating from Kan
 program
   .command("export")
   .description("Export cards from Kanbanize boards to local JSON files")
-  .requiredOption("--board-ids <ids>", "Comma-separated list of Kanbanize board IDs to export (e.g., 7,8,10,13)")
-  .option("--output-dir <path>", "Base output directory for exports", "./kanbanize-export")
+  .option("--board-ids <ids>", "Comma-separated list of Kanbanize board IDs to export (e.g., 7,8,10,13)")
+  .option("--output-dir <path>", "Base output directory for exports", DEFAULT_EXPORT_DIR)
   .action(async options => {
     try {
       // Validate API key
@@ -29,15 +32,50 @@ program
         process.exit(1);
       }
 
-      // Parse board IDs
-      const boardIds = options.boardIds
-        .split(",")
-        .map((id: string) => parseInt(id.trim(), 10))
-        .filter((id: number) => !isNaN(id));
+      let boardIds: number[];
 
-      if (boardIds.length === 0) {
-        console.error(chalk.red("Error: No valid board IDs provided"));
-        process.exit(1);
+      // If board IDs not provided, fetch available boards and let user select
+      if (!options.boardIds) {
+        const { KanbanizeClient } = await import("./kanbanize/client.ts");
+        const client = new KanbanizeClient();
+
+        console.log(chalk.blue("\n🚀 Kanbanize Export\n"));
+        console.log("Fetching available boards...\n");
+
+        const boards = await client.getBoards();
+
+        if (boards.length === 0) {
+          console.error(chalk.red("Error: No boards found"));
+          process.exit(1);
+        }
+
+        const boardChoices = boards.map((board: { name: string; board_id: number }) => ({
+          name: `${board.name} (ID: ${board.board_id})`,
+          value: board.board_id,
+        }));
+
+        const { selectedBoardIds } = await inquirer.prompt<{ selectedBoardIds: number[] }>([
+          {
+            type: "checkbox",
+            name: "selectedBoardIds",
+            message: "Select boards to export:",
+            choices: boardChoices,
+            validate: (input: number[]) => input.length > 0 || "Please select at least one board",
+          },
+        ]);
+
+        boardIds = selectedBoardIds;
+      } else {
+        // Parse board IDs from CLI option
+        boardIds = options.boardIds
+          .split(",")
+          .map((id: string) => parseInt(id.trim(), 10))
+          .filter((id: number) => !isNaN(id));
+
+        if (boardIds.length === 0) {
+          console.error(chalk.red("Error: No valid board IDs provided"));
+          process.exit(1);
+        }
       }
 
       const exportOptions: ExportOptions = {
@@ -62,6 +100,7 @@ program
 program
   .command("import")
   .description("Import cards from Kanbanize export to Linear")
+  .option("--board-id <id>", "Board ID to import (will look in default export directory)")
   .option("--export-path <path>", "Path to a specific board export directory (e.g., ./kanbanize-export/board-7)")
   .option("--swimlane-ids <ids>", "Comma-separated list of swimlane IDs to import (lane_id)")
   .option(
@@ -93,13 +132,30 @@ program
 
       console.log(chalk.blue("\n🚀 Kanbanize to Linear Import\n"));
 
+      // Determine export path
+      let exportPath: string | undefined = options.exportPath;
+
+      // If board ID is provided, construct path from default directory
+      if (options.boardId && !exportPath) {
+        const fs = await import("fs");
+        const path = await import("path");
+        exportPath = path.join(DEFAULT_EXPORT_DIR, `board-${options.boardId}`);
+
+        // Validate that the directory exists
+        if (!fs.existsSync(exportPath)) {
+          console.error(chalk.red(`Error: Export not found at ${exportPath}`));
+          console.log(chalk.gray("Run 'pnpm kanbanize export' first to export boards"));
+          process.exit(1);
+        }
+      }
+
       // If export path is provided via CLI, use non-interactive mode
       let importer;
-      if (options.exportPath) {
+      if (exportPath) {
         // Non-interactive mode with CLI options
         const { KanbanizeImporter } = await import("./importers/kanbanize/KanbanizeImporter.ts");
         const importOptions = {
-          exportPath: options.exportPath,
+          exportPath,
           swimlaneIds: options.swimlaneIds
             ? options.swimlaneIds.split(",").map((id: string) => parseInt(id.trim(), 10))
             : undefined,
@@ -112,7 +168,7 @@ program
         };
         importer = new KanbanizeImporter(importOptions);
       } else {
-        // Interactive mode
+        // Interactive mode - will scan DEFAULT_EXPORT_DIR automatically
         importer = await kanbanizeImport();
       }
 

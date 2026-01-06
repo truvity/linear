@@ -20,30 +20,91 @@ interface KanbanizeImportAnswers {
   statusMappingPath?: string;
 }
 
+// Default export directory
+const DEFAULT_EXPORT_DIR = "./kanbanize-export";
+
+/**
+ * Scan export directory for available board exports
+ */
+function scanExportDirectory(baseDir: string): { path: string; metadata: KanbanizeBoardMetadata }[] {
+  const exports: { path: string; metadata: KanbanizeBoardMetadata }[] = [];
+
+  if (!fs.existsSync(baseDir)) {
+    return exports;
+  }
+
+  const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith("board-")) {
+      const boardDir = path.join(baseDir, entry.name);
+      const metadataPath = path.join(boardDir, "metadata.json");
+      const exportPath = path.join(boardDir, "export.json");
+
+      if (fs.existsSync(metadataPath) && fs.existsSync(exportPath)) {
+        try {
+          const metadata: KanbanizeBoardMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8"));
+          exports.push({ path: boardDir, metadata });
+        } catch {
+          // Skip invalid metadata files
+          console.warn(`Warning: Could not read metadata from ${metadataPath}`);
+        }
+      }
+    }
+  }
+
+  return exports;
+}
+
 /**
  * Interactive prompts for Kanbanize import configuration
  */
 export const kanbanizeImport = async (): Promise<Importer> => {
-  // First, ask for the export path
-  const { exportPath } = await inquirer.prompt<{ exportPath: string }>([
-    {
-      type: "input",
-      name: "exportPath",
-      message: "Path to Kanbanize board export directory:",
-      validate: (input: string) => {
-        const exportFilePath = path.join(input, "export.json");
-        const metadataFilePath = path.join(input, "metadata.json");
+  // Scan for available exports
+  const availableExports = scanExportDirectory(DEFAULT_EXPORT_DIR);
 
-        if (!fs.existsSync(exportFilePath)) {
-          return `export.json not found in ${input}`;
-        }
-        if (!fs.existsSync(metadataFilePath)) {
-          return `metadata.json not found in ${input}`;
-        }
-        return true;
+  let exportPath: string;
+
+  if (availableExports.length === 0) {
+    // No exports found, ask user for path
+    const answer = await inquirer.prompt<{ exportPath: string }>([
+      {
+        type: "input",
+        name: "exportPath",
+        message: "Path to Kanbanize board export directory:",
+        validate: (input: string) => {
+          const exportFilePath = path.join(input, "export.json");
+          const metadataFilePath = path.join(input, "metadata.json");
+
+          if (!fs.existsSync(exportFilePath)) {
+            return `export.json not found in ${input}`;
+          }
+          if (!fs.existsSync(metadataFilePath)) {
+            return `metadata.json not found in ${input}`;
+          }
+          return true;
+        },
       },
-    },
-  ]);
+    ]);
+    exportPath = answer.exportPath;
+  } else {
+    // Show available exports with board names
+    const exportChoices = availableExports.map(exp => ({
+      name: `${exp.metadata.boardName} (Board ID: ${exp.metadata.boardId}, ${exp.metadata.cardCount} cards, exported: ${new Date(exp.metadata.exportedAt).toLocaleString()})`,
+      value: exp.path,
+    }));
+
+    const { selectedPath } = await inquirer.prompt<{ selectedPath: string }>([
+      {
+        type: "list",
+        name: "selectedPath",
+        message: "Select board export to import:",
+        choices: exportChoices,
+      },
+    ]);
+
+    exportPath = selectedPath;
+  }
 
   // Load export data to show available options
   const exportData: KanbanizeBoardExport = JSON.parse(fs.readFileSync(path.join(exportPath, "export.json"), "utf-8"));
@@ -57,6 +118,12 @@ export const kanbanizeImport = async (): Promise<Importer> => {
   const lanes = Object.values(exportData.lanes) as KanbanizeLane[];
   const workflows = exportData.workflows as Record<number, KanbanizeWorkflow>;
 
+  // Count cards per lane
+  const cardsPerLane: Record<number, number> = {};
+  for (const card of exportData.cards) {
+    cardsPerLane[card.lane_id] = (cardsPerLane[card.lane_id] || 0) + 1;
+  }
+
   // Map workflow types to names
   const workflowTypeNames: Record<number, string> = {
     0: "Cards",
@@ -64,26 +131,45 @@ export const kanbanizeImport = async (): Promise<Importer> => {
     2: "Timeline",
   };
 
-  // Create lane choices with workflow names
+  // Create lane choices with workflow names and card counts
   const laneChoices = lanes
     .map(lane => {
       const workflow = workflows[lane.workflow_id];
       const workflowName = workflow?.name || workflowTypeNames[workflow?.type ?? 0] || "Unknown";
+      const cardCount = cardsPerLane[lane.lane_id] || 0;
       return {
-        name: `${workflowName} → ${lane.name}`,
+        name: `${workflowName} → ${lane.name} (${cardCount} cards)`,
         value: lane.lane_id,
         workflow_id: lane.workflow_id,
+        workflow_position: workflow?.position ?? 0,
+        lane_position: lane.position,
       };
     })
-    .sort((a, b) => a.workflow_id - b.workflow_id || a.name.localeCompare(b.name));
+    .sort((a, b) => {
+      // First sort by workflow position
+      if (a.workflow_position !== b.workflow_position) {
+        return a.workflow_position - b.workflow_position;
+      }
+      // Then by lane position within the same workflow
+      return a.lane_position - b.lane_position;
+    });
 
-  // Section choices
+  // Count cards per section
+  const cardsPerSection: Record<number, number> = {};
+  for (const card of exportData.cards) {
+    const column = exportData.columns[card.column_id];
+    if (column) {
+      cardsPerSection[column.section] = (cardsPerSection[column.section] || 0) + 1;
+    }
+  }
+
+  // Section choices with card counts
   const sectionChoices = [
-    { name: "Backlog (Section 1)", value: 1 },
-    { name: "Requested (Section 2)", value: 2 },
-    { name: "In Progress (Section 3)", value: 3 },
-    { name: "Done (Section 4)", value: 4 },
-    { name: "Archive (Section 5)", value: 5 },
+    { name: `Backlog (Section 1) - ${cardsPerSection[1] || 0} cards`, value: 1 },
+    { name: `Requested (Section 2) - ${cardsPerSection[2] || 0} cards`, value: 2 },
+    { name: `In Progress (Section 3) - ${cardsPerSection[3] || 0} cards`, value: 3 },
+    { name: `Done (Section 4) - ${cardsPerSection[4] || 0} cards`, value: 4 },
+    { name: `Archive (Section 5) - ${cardsPerSection[5] || 0} cards`, value: 5 },
   ];
 
   const answers = await inquirer.prompt<Omit<KanbanizeImportAnswers, "exportPath">>([

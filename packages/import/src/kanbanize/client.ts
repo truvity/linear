@@ -435,6 +435,14 @@ export class KanbanizeClient {
   }
 
   /**
+   * Get all boards
+   */
+  public async getBoards(): Promise<KanbanizeBoard[]> {
+    const response = await this.request<{ data: KanbanizeBoard[] }>("/boards");
+    return response.data;
+  }
+
+  /**
    * Get board details
    */
   public async getBoard(boardId: number): Promise<KanbanizeBoard> {
