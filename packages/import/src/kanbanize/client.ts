@@ -33,6 +33,7 @@ export class KanbanizeClient {
   private cacheTTL: number = 5 * 60 * 1000; // 5 minutes default TTL
   private cacheHits: number = 0;
   private cacheMisses: number = 0;
+  private rateLimitWaitPromise: Promise<void> | null = null;
 
   public constructor(config: Partial<KanbanizeApiConfig> = {}) {
     this.apiKey = config.apiKey || process.env.KANBANIZE_API_KEY || "";
@@ -149,6 +150,12 @@ export class KanbanizeClient {
    * Rate limiting: wait if we've exceeded the limit
    */
   private async waitForRateLimit(): Promise<void> {
+    // If a rate limit wait is already in progress, wait for it to complete
+    if (this.rateLimitWaitPromise) {
+      await this.rateLimitWaitPromise;
+      // After waiting, fall through to check rate limit again and push timestamp
+    }
+
     const now = Date.now();
     // Remove timestamps older than the rate limit window
     this.requestTimestamps = this.requestTimestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
@@ -156,7 +163,13 @@ export class KanbanizeClient {
     if (this.requestTimestamps.length >= RATE_LIMIT_PER_MINUTE) {
       const oldestTimestamp = this.requestTimestamps[0];
       const waitTime = RATE_LIMIT_WINDOW_MS - (now - oldestTimestamp) + 100; // Add 100ms buffer
-      await this.waitWithCountdown(waitTime, "Rate limit reached");
+
+      // Create a promise for this wait so other requests can wait for it
+      this.rateLimitWaitPromise = this.waitWithCountdown(waitTime, "Rate limit reached").finally(() => {
+        this.rateLimitWaitPromise = null;
+      });
+
+      await this.rateLimitWaitPromise;
     }
 
     this.requestTimestamps.push(Date.now());
@@ -178,8 +191,12 @@ export class KanbanizeClient {
       const remainingSeconds = Math.ceil(remainingMs / 1000);
 
       if (this.logCallback) {
-        // Using callback - let it handle the display
-        this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
+        // Using callback - only log on first iteration to avoid duplicates
+        // The callback will display the message with progress
+        if (isFirstLog) {
+          this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
+          isFirstLog = false;
+        }
       } else {
         // Using stdout directly - update same line
         if (!isFirstLog) {
