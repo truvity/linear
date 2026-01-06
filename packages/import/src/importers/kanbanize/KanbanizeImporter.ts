@@ -419,6 +419,12 @@ export class KanbanizeImporter implements Importer {
           ? new Date(card.first_start_time)
           : undefined;
 
+      // Build attachments array with local file paths
+      const attachments = card.attachments.map(att => ({
+        fileName: att.file_name,
+        filePath: path.join(this.exportPath, "attachments", att.local_path),
+      }));
+
       importData.issues.push({
         title: card.title,
         description: this.buildDescription(card),
@@ -434,6 +440,7 @@ export class KanbanizeImporter implements Importer {
         startedAt,
         archived: isArchived,
         estimate: card.size ?? undefined,
+        attachments: attachments.length > 0 ? attachments : undefined,
       });
     }
 

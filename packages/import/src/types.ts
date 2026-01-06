@@ -30,6 +30,11 @@ export interface Issue {
   archived?: boolean;
   /** Issue estimate */
   estimate?: number;
+  /** Attachments to be uploaded */
+  attachments?: {
+    fileName: string;
+    filePath: string;
+  }[];
 }
 
 /** Issue comment */

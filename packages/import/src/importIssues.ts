@@ -9,6 +9,7 @@ import ora from "ora";
 import { handleLabels } from "./helpers/labelManager.ts";
 import type { Comment, Importer, ImportResult } from "./types.ts";
 import { replaceImagesInMarkdown } from "./utils/replaceImages.ts";
+import { uploadFileToLinear } from "./utils/uploadFileToLinear.ts";
 
 type Id = string;
 
@@ -230,14 +231,18 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
 
   // Create issues
   for (const issue of importData.issues) {
-    const issueDescription = issue.description
+    let issueDescription = issue.description
       ? await replaceImagesInMarkdown(client, issue.description, importData.resourceURLSuffix)
       : undefined;
 
-    const description =
+    // Add comments if requested
+    issueDescription =
       importAnswers.includeComments && issue.comments
         ? await buildComments(client, issueDescription || "", issue.comments, importData)
         : issueDescription;
+
+    // Upload and add attachments
+    const description = await buildAttachments(client, issueDescription || "", issue.attachments);
 
     const labelIds = issue.labels ? uniq(issue.labels.map(labelId => labelMapping[labelId].id)) : undefined;
 
@@ -330,6 +335,35 @@ const buildComments = async (
     newComments.push(`**${user.name}**${" " + date}\n\n${body}\n`);
   }
   return `${description}\n\n---\n\n${newComments.join("\n\n")}`;
+};
+
+// Upload attachments and append them to the issue description
+const buildAttachments = async (
+  client: LinearClient,
+  description: string,
+  attachments?: { fileName: string; filePath: string }[]
+) => {
+  if (!attachments || attachments.length === 0) {
+    return description;
+  }
+
+  const attachmentLinks: string[] = [];
+
+  for (const attachment of attachments) {
+    try {
+      const assetUrl = await uploadFileToLinear(client, attachment.filePath, attachment.fileName);
+      attachmentLinks.push(`- [${attachment.fileName}](${assetUrl})`);
+    } catch (error) {
+      console.warn(`Warning: Failed to upload attachment ${attachment.fileName}:`, error);
+      // Continue with other attachments even if one fails
+    }
+  }
+
+  if (attachmentLinks.length === 0) {
+    return description;
+  }
+
+  return `${description}\n\n---\n\n**Attachments**\n\n${attachmentLinks.join("\n")}`;
 };
 
 const createIssueWithRetries = async (
