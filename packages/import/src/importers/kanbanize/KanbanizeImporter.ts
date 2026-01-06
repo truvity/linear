@@ -208,7 +208,7 @@ export class KanbanizeImporter implements Importer {
       return "";
     }
 
-    return `\n\n---\n\n**Relations from Kanbanize**\n\n${sections.join("\n\n")}\n\n---`;
+    return `\n\n---\n\n**Relations from Kanbanize**\n\n${sections.join("\n\n")}`;
   }
 
   /**
