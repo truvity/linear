@@ -242,7 +242,7 @@ export interface ExportOptions {
 
 export interface ImportOptions {
   exportPath: string;
-  swimlaneId?: number;
+  swimlaneIds?: number[];
   sections?: number[];
   statusMapping?: Record<string, string>;
 }

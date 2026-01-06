@@ -8,12 +8,13 @@ import type {
   KanbanizeBoardExport,
   KanbanizeBoardMetadata,
   KanbanizeLane,
+  KanbanizeWorkflow,
 } from "../../kanbanize/types.ts";
 import { KanbanizeImporter } from "./KanbanizeImporter.ts";
 
 interface KanbanizeImportAnswers {
   exportPath: string;
-  swimlaneId?: number;
+  swimlaneIds: number[];
   sections: number[];
   useStatusMapping: boolean;
   statusMappingPath?: string;
@@ -52,15 +53,29 @@ export const kanbanizeImport = async (): Promise<Importer> => {
   console.log(`Total cards: ${metadata.cardCount}`);
   console.log(`Exported at: ${metadata.exportedAt}\n`);
 
-  // Get available lanes (swimlanes)
+  // Get available lanes (swimlanes) and workflows
   const lanes = Object.values(exportData.lanes) as KanbanizeLane[];
-  const laneChoices = [
-    { name: "All swimlanes", value: undefined },
-    ...lanes.map(lane => ({
-      name: lane.name,
-      value: lane.lane_id,
-    })),
-  ];
+  const workflows = exportData.workflows as Record<number, KanbanizeWorkflow>;
+
+  // Map workflow types to names
+  const workflowTypeNames: Record<number, string> = {
+    0: "Cards",
+    1: "Initiatives",
+    2: "Timeline",
+  };
+
+  // Create lane choices with workflow names
+  const laneChoices = lanes
+    .map(lane => {
+      const workflow = workflows[lane.workflow_id];
+      const workflowName = workflow?.name || workflowTypeNames[workflow?.type ?? 0] || "Unknown";
+      return {
+        name: `${workflowName} → ${lane.name}`,
+        value: lane.lane_id,
+        workflow_id: lane.workflow_id,
+      };
+    })
+    .sort((a, b) => a.workflow_id - b.workflow_id || a.name.localeCompare(b.name));
 
   // Section choices
   const sectionChoices = [
@@ -73,9 +88,9 @@ export const kanbanizeImport = async (): Promise<Importer> => {
 
   const answers = await inquirer.prompt<Omit<KanbanizeImportAnswers, "exportPath">>([
     {
-      type: "list",
-      name: "swimlaneId",
-      message: "Select swimlane to import:",
+      type: "checkbox",
+      name: "swimlaneIds",
+      message: "Select swimlanes to import (leave empty for all):",
       choices: laneChoices,
     },
     {
@@ -117,7 +132,7 @@ export const kanbanizeImport = async (): Promise<Importer> => {
 
   // Calculate filtered card count
   const filteredCards = exportData.cards.filter(card => {
-    if (answers.swimlaneId !== undefined && card.lane_id !== answers.swimlaneId) {
+    if (answers.swimlaneIds && answers.swimlaneIds.length > 0 && !answers.swimlaneIds.includes(card.lane_id)) {
       return false;
     }
     if (answers.sections && answers.sections.length > 0) {
@@ -133,7 +148,7 @@ export const kanbanizeImport = async (): Promise<Importer> => {
 
   const importOptions: ImportOptions = {
     exportPath,
-    swimlaneId: answers.swimlaneId,
+    swimlaneIds: answers.swimlaneIds.length > 0 ? answers.swimlaneIds : undefined,
     sections: answers.sections.length > 0 ? answers.sections : undefined,
     statusMapping,
   };

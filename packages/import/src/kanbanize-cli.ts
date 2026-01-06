@@ -63,7 +63,7 @@ program
   .command("import")
   .description("Import cards from Kanbanize export to Linear")
   .option("--export-path <path>", "Path to a specific board export directory (e.g., ./kanbanize-export/board-7)")
-  .option("--swimlane-id <id>", "Filter cards by swimlane (lane_id)")
+  .option("--swimlane-ids <ids>", "Comma-separated list of swimlane IDs to import (lane_id)")
   .option(
     "--sections <sections>",
     "Comma-separated list of sections to migrate (1=Backlog, 2=Requested, 3=Progress, 4=Done, 5=Archive)"
@@ -100,7 +100,9 @@ program
         const { KanbanizeImporter } = await import("./importers/kanbanize/KanbanizeImporter.ts");
         const importOptions = {
           exportPath: options.exportPath,
-          swimlaneId: options.swimlaneId ? parseInt(options.swimlaneId, 10) : undefined,
+          swimlaneIds: options.swimlaneIds
+            ? options.swimlaneIds.split(",").map((id: string) => parseInt(id.trim(), 10))
+            : undefined,
           sections: options.sections
             ? options.sections.split(",").map((s: string) => parseInt(s.trim(), 10))
             : undefined,

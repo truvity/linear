@@ -43,7 +43,7 @@ const PRIORITY_MAP: Record<number, IssuePriority> = {
  */
 export class KanbanizeImporter implements Importer {
   private exportPath: string;
-  private swimlaneId?: number;
+  private swimlaneIds?: number[];
   private sections?: number[];
   private statusMapping?: Record<string, string>;
   private exportData!: KanbanizeBoardExport;
@@ -52,7 +52,7 @@ export class KanbanizeImporter implements Importer {
 
   public constructor(options: ImportOptions) {
     this.exportPath = options.exportPath;
-    this.swimlaneId = options.swimlaneId;
+    this.swimlaneIds = options.swimlaneIds;
     this.sections = options.sections;
     this.statusMapping = options.statusMapping;
   }
@@ -85,12 +85,12 @@ export class KanbanizeImporter implements Importer {
   }
 
   /**
-   * Filter cards based on swimlane and sections
+   * Filter cards based on swimlanes and sections
    */
   private filterCards(cards: ExportedCard[]): ExportedCard[] {
     return cards.filter(card => {
-      // Filter by swimlane if specified
-      if (this.swimlaneId !== undefined && card.lane_id !== this.swimlaneId) {
+      // Filter by swimlanes if specified
+      if (this.swimlaneIds && this.swimlaneIds.length > 0 && !this.swimlaneIds.includes(card.lane_id)) {
         return false;
       }
 
