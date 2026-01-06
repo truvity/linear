@@ -480,7 +480,7 @@ const buildComments = async (
     const body = await replaceImagesInMarkdown(client, comment.body || "", importData.resourceURLSuffix);
     newComments.push(`**${user.name}**${" " + date}\n\n${body}\n`);
   }
-  return `${description}\n\n---\n\n${newComments.join("\n\n")}`;
+  return `${description}\n\n---\n\n**Comments from Kanbanize**\n\n${newComments.join("\n\n")}`;
 };
 
 // Upload attachments and append them to the issue description
@@ -509,7 +509,7 @@ const buildAttachments = async (
     return description;
   }
 
-  return `${description}\n\n---\n\n**Attachments**\n\n${attachmentLinks.join("\n")}`;
+  return `${description}\n\n---\n\n**Attachments from Kanbanize**\n\n${attachmentLinks.join("\n")}`;
 };
 
 const createIssueWithRetries = async (
