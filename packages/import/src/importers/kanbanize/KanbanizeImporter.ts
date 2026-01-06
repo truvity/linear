@@ -286,7 +286,7 @@ export class KanbanizeImporter implements Importer {
       return "";
     }
 
-    return `**Relations from Kanbanize**\n\n${sections.join("\n\n")}\n\n---\n\n`;
+    return `\n\n---\n\n**Relations from Kanbanize**\n\n${sections.join("\n\n")}`;
   }
 
   /**
@@ -307,17 +307,16 @@ export class KanbanizeImporter implements Importer {
   private buildDescription(card: ExportedCard): string {
     const parts: string[] = [];
 
-    // Kanbanize card ID reference at the beginning
-    parts.push(`**Kanbanize ID:** kn-${card.card_id}`);
-    parts.push(`\n\n---\n\n`);
-
     // Original description converted to Markdown
     let mdDescription = htmlToMarkdown(card.description);
     if (mdDescription) {
       // Fix relative inline image URLs
       mdDescription = this.fixInlineImageUrls(mdDescription);
-      parts.push(`${mdDescription}\n\n---\n\n`);
+      parts.push(mdDescription);
     }
+
+    // Kanbanize card meta information
+    parts.push(`\n\n---\n\n**Details from Kanbanize**\n\n- **Kanbanize ID**: kn-${card.card_id}`);
 
     // Relations section
     const relationsSection = this.buildRelationsSection(card);

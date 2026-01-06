@@ -492,7 +492,7 @@ const buildComments = async (
     return description;
   }
 
-  return `${description}**Comments from Kanbanize**\n\n${newComments.join("\n\n")}\n\n---\n\n`;
+  return `${description}\n\n---\n\n**Comments from Kanbanize**\n\n${newComments.join("\n\n")}`;
 };
 
 // Upload attachments and append them to the issue description
@@ -521,7 +521,7 @@ const buildAttachments = async (
     return description;
   }
 
-  return `${description}**Attachments from Kanbanize**\n\n${attachmentLinks.join("\n")}\n\n---\n\n`;
+  return `${description}\n\n---\n\n**Attachments from Kanbanize**\n\n${attachmentLinks.join("\n")}`;
 };
 
 const createIssueWithRetries = async (
