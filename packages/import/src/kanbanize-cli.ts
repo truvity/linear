@@ -40,19 +40,38 @@ program
         const client = new KanbanizeClient();
 
         console.log(chalk.blue("\n🚀 Kanbanize Export\n"));
-        console.log("Fetching available boards...\n");
+        console.log("Fetching available boards and workspaces...\n");
 
-        const boards = await client.getBoards();
+        const [boards, workspaces] = await Promise.all([client.getBoards(), client.getWorkspaces()]);
 
         if (boards.length === 0) {
           console.error(chalk.red("Error: No boards found"));
           process.exit(1);
         }
 
-        const boardChoices = boards.map((board: { name: string; board_id: number }) => ({
-          name: `${board.name} (ID: ${board.board_id})`,
-          value: board.board_id,
-        }));
+        // Create workspace lookup map
+        const workspaceMap = new Map<number, string>();
+        for (const workspace of workspaces) {
+          workspaceMap.set(workspace.workspace_id, workspace.name);
+        }
+
+        const boardChoices = boards
+          .map((board: { name: string; board_id: number; workspace_id: number }) => {
+            const workspaceName = workspaceMap.get(board.workspace_id) || "Unknown";
+            return {
+              name: `${workspaceName} → ${board.name} (ID: ${board.board_id})`,
+              value: board.board_id,
+              workspace_id: board.workspace_id,
+            };
+          })
+          .sort((a, b) => {
+            // First sort by workspace_id
+            if (a.workspace_id !== b.workspace_id) {
+              return a.workspace_id - b.workspace_id;
+            }
+            // Then sort by board_id
+            return a.value - b.value;
+          });
 
         const { selectedBoardIds } = await inquirer.prompt<{ selectedBoardIds: number[] }>([
           {

@@ -88,11 +88,22 @@ export const kanbanizeImport = async (): Promise<Importer> => {
     ]);
     exportPath = answer.exportPath;
   } else {
-    // Show available exports with board names
-    const exportChoices = availableExports.map(exp => ({
-      name: `${exp.metadata.boardName} (Board ID: ${exp.metadata.boardId}, ${exp.metadata.cardCount} cards, exported: ${new Date(exp.metadata.exportedAt).toLocaleString("en-NL")})`,
-      value: exp.path,
-    }));
+    // Show available exports with workspace and board names
+    const exportChoices = availableExports
+      .map(exp => ({
+        name: `${exp.metadata.workspaceName} → ${exp.metadata.boardName} (Board ID: ${exp.metadata.boardId}, ${exp.metadata.cardCount} cards, exported: ${new Date(exp.metadata.exportedAt).toLocaleString("en-NL")})`,
+        value: exp.path,
+        workspaceId: exp.metadata.workspaceId,
+        boardId: exp.metadata.boardId,
+      }))
+      .sort((a, b) => {
+        // First sort by workspace_id
+        if (a.workspaceId !== b.workspaceId) {
+          return a.workspaceId - b.workspaceId;
+        }
+        // Then sort by board_id
+        return a.boardId - b.boardId;
+      });
 
     const { selectedPath } = await inquirer.prompt<{ selectedPath: string }>([
       {
