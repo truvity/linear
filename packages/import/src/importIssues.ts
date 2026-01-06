@@ -238,14 +238,14 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
       ? await replaceImagesInMarkdown(client, issue.description, importData.resourceURLSuffix)
       : undefined;
 
+    // Upload and add attachments
+    issueDescription = await buildAttachments(client, issueDescription || "", issue.attachments);
+
     // Add comments if requested
-    issueDescription =
+    const description =
       importAnswers.includeComments && issue.comments
         ? await buildComments(client, issueDescription || "", issue.comments, importData)
         : issueDescription;
-
-    // Upload and add attachments
-    const description = await buildAttachments(client, issueDescription || "", issue.attachments);
 
     const labelIds = issue.labels ? uniq(issue.labels.map(labelId => labelMapping[labelId].id)) : undefined;
 
