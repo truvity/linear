@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import { LinearClient } from "@linear/sdk";
+import { LinearClient, IssueRelationType } from "@linear/sdk";
 import chalk from "chalk";
 import { Presets, SingleBar } from "cli-progress";
 import { format } from "date-fns";
@@ -366,7 +366,7 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
               await client.createIssueRelation({
                 issueId,
                 relatedIssueId: parentId,
-                type: "related",
+                type: IssueRelationType.Related,
               });
               relationshipsCreated++;
             } catch (error) {
@@ -386,7 +386,7 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
               await client.createIssueRelation({
                 issueId,
                 relatedIssueId: childId,
-                type: "related",
+                type: IssueRelationType.Related,
               });
               relationshipsCreated++;
             } catch (error) {
@@ -406,7 +406,7 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
               await client.createIssueRelation({
                 issueId,
                 relatedIssueId: relatedId,
-                type: "related",
+                type: IssueRelationType.Related,
               });
               relationshipsCreated++;
             } catch (error) {
@@ -427,7 +427,7 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
               await client.createIssueRelation({
                 issueId: predecessorId,
                 relatedIssueId: issueId,
-                type: "blocks",
+                type: IssueRelationType.Blocks,
               });
               relationshipsCreated++;
             } catch (error) {
@@ -448,7 +448,7 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
               await client.createIssueRelation({
                 issueId,
                 relatedIssueId: successorId,
-                type: "blocks",
+                type: IssueRelationType.Blocks,
               });
               relationshipsCreated++;
             } catch (error) {
