@@ -229,6 +229,9 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
   issuesProgressBar.start(importData.issues.length, 0);
   let issueCursor = 0;
 
+  // Map sourceId to Linear issue ID for relationship creation
+  const sourceIdToLinearId = new Map<string, string>();
+
   // Create issues
   for (const issue of importData.issues) {
     let issueDescription = issue.description
@@ -302,8 +305,14 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
         estimate: issue.estimate,
       });
 
-      if (issue.archived) {
-        await (await createdIssue.issue)?.archive();
+      const linearIssue = await createdIssue.issue;
+
+      if (linearIssue?.id && issue.sourceId) {
+        sourceIdToLinearId.set(issue.sourceId, linearIssue.id);
+      }
+
+      if (issue.archived && linearIssue) {
+        await linearIssue.archive();
       }
 
       issueCursor++;
@@ -315,6 +324,143 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
   }
 
   issuesProgressBar.stop();
+
+  // Create native relationships
+  const issuesWithRelationships = importData.issues.filter(
+    issue =>
+      (issue.parentIds && issue.parentIds.length > 0) ||
+      (issue.childIds && issue.childIds.length > 0) ||
+      (issue.relatedIds && issue.relatedIds.length > 0) ||
+      (issue.predecessorIds && issue.predecessorIds.length > 0) ||
+      (issue.successorIds && issue.successorIds.length > 0)
+  );
+
+  if (issuesWithRelationships.length > 0) {
+    spinner = ora("Creating issue relationships").start();
+    let relationshipsCreated = 0;
+    let relationshipsFailed = 0;
+
+    for (const issue of issuesWithRelationships) {
+      if (!issue.sourceId) {
+        continue;
+      }
+
+      const issueId = sourceIdToLinearId.get(issue.sourceId);
+      if (!issueId) {
+        continue;
+      }
+
+      // Create parent relationships (as 'related' in Linear)
+      if (issue.parentIds && issue.parentIds.length > 0) {
+        for (const parentSourceId of issue.parentIds) {
+          const parentId = sourceIdToLinearId.get(parentSourceId);
+          if (parentId) {
+            try {
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: parentId,
+                type: "related",
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create parent relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create child relationships (as 'related' in Linear)
+      if (issue.childIds && issue.childIds.length > 0) {
+        for (const childSourceId of issue.childIds) {
+          const childId = sourceIdToLinearId.get(childSourceId);
+          if (childId) {
+            try {
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: childId,
+                type: "related",
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create child relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create related relationships
+      if (issue.relatedIds && issue.relatedIds.length > 0) {
+        for (const relatedSourceId of issue.relatedIds) {
+          const relatedId = sourceIdToLinearId.get(relatedSourceId);
+          if (relatedId) {
+            try {
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: relatedId,
+                type: "related",
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create related relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create predecessor relationships (predecessor blocks current issue)
+      if (issue.predecessorIds && issue.predecessorIds.length > 0) {
+        for (const predecessorSourceId of issue.predecessorIds) {
+          const predecessorId = sourceIdToLinearId.get(predecessorSourceId);
+          if (predecessorId) {
+            try {
+              // Predecessor blocks this issue
+              await client.createIssueRelation({
+                issueId: predecessorId,
+                relatedIssueId: issueId,
+                type: "blocks",
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create predecessor relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create successor relationships (current issue blocks successor)
+      if (issue.successorIds && issue.successorIds.length > 0) {
+        for (const successorSourceId of issue.successorIds) {
+          const successorId = sourceIdToLinearId.get(successorSourceId);
+          if (successorId) {
+            try {
+              // This issue blocks successor
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: successorId,
+                type: "blocks",
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create successor relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+    }
+
+    spinner.stop();
+    console.info(
+      chalk.green(
+        `Created ${relationshipsCreated} issue relationship(s)` +
+          (relationshipsFailed > 0 ? chalk.yellow(` (${relationshipsFailed} failed)`) : "")
+      )
+    );
+  }
 
   console.info(chalk.green(`${importer.name} issues imported to your team: https://linear.app/team/${teamKey}/all`));
 };

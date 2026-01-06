@@ -135,7 +135,76 @@ export class KanbanizeImporter implements Importer {
   }
 
   /**
+   * Check if a linked card can be natively linked (same board and being migrated)
+   */
+  private canBeNativelyLinked(link: KanbanizeLinkedCard): boolean {
+    const linkedBoardId = link.board_id || this.metadata.boardId;
+    const isSameBoard = linkedBoardId === this.metadata.boardId;
+    const isMigrated = this.migratedCardIds.has(link.card_id);
+    return isSameBoard && isMigrated;
+  }
+
+  /**
+   * Extract native relationship IDs for all Kanbanize link types
+   */
+  private extractNativeRelationships(card: ExportedCard): {
+    parentIds: string[];
+    childIds: string[];
+    relatedIds: string[];
+    predecessorIds: string[];
+    successorIds: string[];
+  } {
+    const parentIds: string[] = [];
+    const childIds: string[] = [];
+    const relatedIds: string[] = [];
+    const predecessorIds: string[] = [];
+    const successorIds: string[] = [];
+
+    if (!card.linked_cards || card.linked_cards.length === 0) {
+      return { parentIds, childIds, relatedIds, predecessorIds, successorIds };
+    }
+
+    for (const link of card.linked_cards) {
+      if (!this.canBeNativelyLinked(link)) {
+        continue;
+      }
+
+      // Map all Kanbanize relationship types to Linear relationships
+      const linkId = String(link.card_id);
+
+      switch (link.link_type) {
+        case "parent":
+          // Parent relationship - will be linked as 'related' in Linear
+          parentIds.push(linkId);
+          break;
+        case "child":
+          // Child relationship - will be linked as 'related' in Linear
+          childIds.push(linkId);
+          break;
+        case "relative":
+          // Relative relationship - maps directly to Linear's 'related'
+          relatedIds.push(linkId);
+          break;
+        case "predecessor":
+          // Predecessor blocks this card - will be linked as 'blocks' in Linear
+          predecessorIds.push(linkId);
+          break;
+        case "successor":
+          // This card blocks successor - will be linked as 'blocks' in Linear
+          successorIds.push(linkId);
+          break;
+        default:
+          // Unknown link type - skip it
+          break;
+      }
+    }
+
+    return { parentIds, childIds, relatedIds, predecessorIds, successorIds };
+  }
+
+  /**
    * Build the relations section for a card's description
+   * Includes all relations with markers indicating which are natively linked
    */
   private buildRelationsSection(card: ExportedCard): string {
     if (!card.linked_cards || card.linked_cards.length === 0) {
@@ -150,7 +219,7 @@ export class KanbanizeImporter implements Importer {
       relative: [],
     };
 
-    // Group relations by type
+    // Group all relations by type
     for (const link of card.linked_cards) {
       if (relationsByType[link.link_type]) {
         relationsByType[link.link_type].push(link);
@@ -182,8 +251,17 @@ export class KanbanizeImporter implements Importer {
         const linkedBoardId = link.board_id || this.metadata.boardId;
         const url = `${KANBANIZE_BASE_URL}/ctrl_board/${linkedBoardId}/cards/${link.card_id}`;
 
+        const canBeNative = this.canBeNativelyLinked(link);
         const isMigrated = this.migratedCardIds.has(link.card_id);
-        const marker = isMigrated ? "*(migrated)*" : "*(not migrated)*";
+
+        // Determine the appropriate marker
+        let marker = "*(not migrated)*";
+        if (canBeNative) {
+          marker = "*(natively linked)*";
+        } else if (isMigrated) {
+          marker = "*(migrated, not linked)*";
+        }
+
         const kanbanizeId = `kn-${link.card_id}`;
 
         // Get the status (column name) - use enriched data if available
@@ -425,7 +503,11 @@ export class KanbanizeImporter implements Importer {
         filePath: path.join(this.exportPath, "attachments", att.local_path),
       }));
 
+      // Extract native relationships for all link types
+      const { parentIds, childIds, relatedIds, predecessorIds, successorIds } = this.extractNativeRelationships(card);
+
       importData.issues.push({
+        sourceId: String(card.card_id),
         title: card.title,
         description: this.buildDescription(card),
         status: this.getStatusName(card),
@@ -441,6 +523,11 @@ export class KanbanizeImporter implements Importer {
         archived: isArchived,
         estimate: card.size ?? undefined,
         attachments: attachments.length > 0 ? attachments : undefined,
+        parentIds: parentIds.length > 0 ? parentIds : undefined,
+        childIds: childIds.length > 0 ? childIds : undefined,
+        relatedIds: relatedIds.length > 0 ? relatedIds : undefined,
+        predecessorIds: predecessorIds.length > 0 ? predecessorIds : undefined,
+        successorIds: successorIds.length > 0 ? successorIds : undefined,
       });
     }
 
