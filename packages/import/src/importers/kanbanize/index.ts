@@ -90,7 +90,7 @@ export const kanbanizeImport = async (): Promise<Importer> => {
   } else {
     // Show available exports with board names
     const exportChoices = availableExports.map(exp => ({
-      name: `${exp.metadata.boardName} (Board ID: ${exp.metadata.boardId}, ${exp.metadata.cardCount} cards, exported: ${new Date(exp.metadata.exportedAt).toLocaleString()})`,
+      name: `${exp.metadata.boardName} (Board ID: ${exp.metadata.boardId}, ${exp.metadata.cardCount} cards, exported: ${new Date(exp.metadata.exportedAt).toLocaleString("en-NL")})`,
       value: exp.path,
     }));
 
