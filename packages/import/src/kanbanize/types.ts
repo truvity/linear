@@ -42,6 +42,15 @@ export interface KanbanizeLane {
   color: string;
 }
 
+export interface KanbanizeWorkflow {
+  workflow_id: number;
+  type: 0 | 1 | 2; // 0=Cards, 1=Initiatives, 2=Timeline
+  position: number;
+  is_enabled: 0 | 1;
+  is_collapsible: 0 | 1;
+  name?: string;
+}
+
 export interface KanbanizeLinkedCard {
   card_id: number;
   link_type: "parent" | "child" | "predecessor" | "successor" | "relative";
@@ -193,6 +202,7 @@ export interface KanbanizeBoardExport {
   tags: Record<number, KanbanizeTag>;
   columns: Record<number, KanbanizeColumn>;
   lanes: Record<number, KanbanizeLane>;
+  workflows: Record<number, KanbanizeWorkflow>;
 
   // Cards with their comments
   cards: ExportedCard[];

@@ -16,6 +16,7 @@ import type {
   KanbanizeLinkedCard,
   KanbanizeTag,
   KanbanizeUser,
+  KanbanizeWorkflow,
   KanbanizeWorkspace,
 } from "./types.ts";
 
@@ -123,12 +124,13 @@ export class KanbanizeExporter {
     const workspace = this.workspaces.get(board.workspace_id);
 
     // Fetch reference data
-    console.log("Fetching reference data (users, tags, columns, lanes)...");
-    const [users, tags, columns, lanes] = await Promise.all([
+    console.log("Fetching reference data (users, tags, columns, lanes, workflows)...");
+    const [users, tags, columns, lanes, workflows] = await Promise.all([
       this.client.getUsers(),
       this.client.getTags(boardId),
       this.client.getColumns(boardId),
       this.client.getLanes(boardId),
+      this.client.getWorkflows(boardId),
     ]);
 
     // Create lookup maps
@@ -143,6 +145,9 @@ export class KanbanizeExporter {
 
     const lanesMap: Record<number, KanbanizeLane> = {};
     lanes.forEach(l => (lanesMap[l.lane_id] = l));
+
+    const workflowsMap: Record<number, KanbanizeWorkflow> = {};
+    workflows.forEach(w => (workflowsMap[w.workflow_id] = w));
 
     // Process each card (fetch comments, download attachments)
     const exportedCards: ExportedCard[] = [];
@@ -399,6 +404,7 @@ export class KanbanizeExporter {
       tags: filteredTagsMap,
       columns: columnsMap,
       lanes: lanesMap,
+      workflows: workflowsMap,
       cards: exportedCards,
     };
 

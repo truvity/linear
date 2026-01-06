@@ -11,6 +11,7 @@ import type {
   KanbanizeLane,
   KanbanizeTag,
   KanbanizeUser,
+  KanbanizeWorkflow,
   KanbanizeWorkspace,
 } from "./types.ts";
 
@@ -191,12 +192,9 @@ export class KanbanizeClient {
       const remainingSeconds = Math.ceil(remainingMs / 1000);
 
       if (this.logCallback) {
-        // Using callback - only log on first iteration to avoid duplicates
-        // The callback will display the message with progress
-        if (isFirstLog) {
-          this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
-          isFirstLog = false;
-        }
+        // Using callback - update every second so countdown is visible
+        // The exporter's callback handles clearing the line with \r\x1b[K
+        this.log(`${reason}. Waiting ${remainingSeconds}s...`, false);
       } else {
         // Using stdout directly - update same line
         if (!isFirstLog) {
@@ -425,6 +423,14 @@ export class KanbanizeClient {
    */
   public async getLanes(boardId: number): Promise<KanbanizeLane[]> {
     const response = await this.request<{ data: KanbanizeLane[] }>(`/boards/${boardId}/lanes`);
+    return response.data;
+  }
+
+  /**
+   * Get all workflows for a board
+   */
+  public async getWorkflows(boardId: number): Promise<KanbanizeWorkflow[]> {
+    const response = await this.request<{ data: KanbanizeWorkflow[] }>(`/boards/${boardId}/workflows`);
     return response.data;
   }
 
