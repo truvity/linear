@@ -460,6 +460,31 @@ export class KanbanizeClient {
   }
 
   /**
+   * Download an inline image as a buffer
+   */
+  public async downloadInlineImage(imageLink: string): Promise<{ buffer: Buffer; contentType: string }> {
+    await this.waitForRateLimit();
+
+    // Construct full URL for inline image
+    const url = imageLink.startsWith("http") ? imageLink : `${this.baseUrl.replace("/api/v2", "")}${imageLink}`;
+
+    const response = await fetch(url, {
+      headers: {
+        apikey: this.apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to download inline image: ${response.status} ${response.statusText}`);
+    }
+
+    const buffer = await response.buffer();
+    const contentType = response.headers.get("content-type") || "image/png";
+
+    return { buffer, contentType };
+  }
+
+  /**
    * Get the base URL for constructing card links
    */
   public getCardUrl(boardId: number, cardId: number): string {

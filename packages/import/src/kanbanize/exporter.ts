@@ -31,6 +31,50 @@ export class KanbanizeExporter {
   }
 
   /**
+   * Extract inline image URLs from HTML content
+   */
+  private extractInlineImages(html: string): string[] {
+    const regex = /src=["']\/inlineImages\/([^"']+)["']/g;
+    const images: string[] = [];
+    let match;
+
+    while ((match = regex.exec(html)) !== null) {
+      images.push(`/inlineImages/${match[1]}`);
+    }
+
+    return images;
+  }
+
+  /**
+   * Download inline images and replace URLs with base64 data URIs
+   */
+  private async processInlineImages(html: string, cardId: number): Promise<string> {
+    const inlineImages = this.extractInlineImages(html);
+
+    if (inlineImages.length === 0) {
+      return html;
+    }
+
+    let processedHtml = html;
+
+    for (const imageUrl of inlineImages) {
+      try {
+        const { buffer, contentType } = await this.client.downloadInlineImage(imageUrl);
+        const base64 = buffer.toString("base64");
+        const dataUri = `data:${contentType};base64,${base64}`;
+
+        // Replace the URL in the HTML
+        processedHtml = processedHtml.replace(new RegExp(imageUrl, "g"), dataUri);
+      } catch (error) {
+        console.warn(`\nWarning: Failed to download inline image ${imageUrl} for card ${cardId}: ${error}`);
+        // Leave the original URL if download fails
+      }
+    }
+
+    return processedHtml;
+  }
+
+  /**
    * Export multiple boards to separate directories
    */
   public async exportBoards(options: ExportOptions): Promise<void> {
@@ -202,9 +246,12 @@ export class KanbanizeExporter {
           }
         }
 
+        // Process inline images in comment text
+        const processedCommentText = await this.processInlineImages(comment.text, card.card_id);
+
         exportedComments.push({
           comment_id: comment.comment_id,
-          text: comment.text,
+          text: processedCommentText,
           author_user_id: comment.author?.value || 0,
           created_at: comment.created_at,
           attachments: commentAttachments,
@@ -251,6 +298,9 @@ export class KanbanizeExporter {
         }
       }
 
+      // Process inline images in card description
+      const processedDescription = await this.processInlineImages(card.description || "", card.card_id);
+
       // Build exported card
       const exportedCard: ExportedCard = {
         card_id: card.card_id,
@@ -258,7 +308,7 @@ export class KanbanizeExporter {
         board_id: card.board_id,
         workflow_id: card.workflow_id,
         title: card.title,
-        description: card.description || "",
+        description: processedDescription,
         column_id: card.column_id,
         lane_id: card.lane_id,
         section: card.section,
