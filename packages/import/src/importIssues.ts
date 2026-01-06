@@ -315,6 +315,13 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
         await linearIssue.archive();
       }
 
+      // Create native attachment link for the original issue URL
+      if (issue.url && linearIssue?.id) {
+        await createAttachmentLinkWithRetries(client, linearIssue.id, issue.url, "View original card in Kanbanize");
+        // Small delay to avoid hitting rate limits (20 requests per minute for this endpoint)
+        await new Promise(resolve => setTimeout(resolve, 3500));
+      }
+
       issueCursor++;
       issuesProgressBar.update(issueCursor);
     } catch (error) {
@@ -525,6 +532,34 @@ const createIssueWithRetries = async (
       // header to find out how long to wait.
       await new Promise(resolve => setTimeout(resolve, 60000));
       return createIssueWithRetries(client, input, retries - 1);
+    } else {
+      throw error;
+    }
+  }
+};
+
+const createAttachmentLinkWithRetries = async (
+  client: LinearClient,
+  issueId: string,
+  url: string,
+  title: string,
+  retries = 3
+): Promise<void> => {
+  try {
+    await client.attachmentLinkURL(issueId, url, { title });
+  } catch (error) {
+    if (error.type === "Ratelimited" && retries > 0) {
+      // Get the reset time from the error if available
+      const resetAt = error.complexityResetAt || Date.now() + 60000;
+      const waitTime = Math.max(resetAt - Date.now(), 1000);
+
+      console.warn(`Rate limit hit for attachment links. Waiting ${Math.ceil(waitTime / 1000)}s before retrying...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+
+      return createAttachmentLinkWithRetries(client, issueId, url, title, retries - 1);
+    } else if (error.type !== "Ratelimited") {
+      // Don't throw on non-rate-limit errors, just log them
+      console.warn(`Warning: Failed to create attachment link for issue ${issueId}:`, error.message || error);
     } else {
       throw error;
     }

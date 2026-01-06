@@ -307,20 +307,17 @@ export class KanbanizeImporter implements Importer {
   private buildDescription(card: ExportedCard): string {
     const parts: string[] = [];
 
+    // Kanbanize card ID reference at the beginning
+    parts.push(`**Kanbanize ID:** kn-${card.card_id}`);
+    parts.push(`\n\n---\n`);
+
     // Original description converted to Markdown
     let mdDescription = htmlToMarkdown(card.description);
     if (mdDescription) {
       // Fix relative inline image URLs
       mdDescription = this.fixInlineImageUrls(mdDescription);
-      parts.push(mdDescription);
+      parts.push(`\n${mdDescription}`);
     }
-
-    // Link to original card
-    const originalUrl = `${KANBANIZE_BASE_URL}/ctrl_board/${this.metadata.boardId}/cards/${card.card_id}`;
-    parts.push(`\n\n[View original card in Kanbanize](${originalUrl})`);
-
-    // Kanbanize card ID reference
-    parts.push(`\n\n*Kanbanize ID: kn-${card.card_id}*`);
 
     // Relations section
     const relationsSection = this.buildRelationsSection(card);
