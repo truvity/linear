@@ -1,4 +1,3 @@
- 
 import fetch from "node-fetch";
 import * as fs from "fs";
 import * as path from "path";
@@ -285,45 +284,6 @@ export class KanbanizeClient {
   }
 
   /**
-   * Get list of card IDs for a board (using the list endpoint which returns limited fields)
-   */
-  public async getCardIdsList(boardId: number): Promise<number[]> {
-    return this.getCardIds(boardId);
-  }
-
-  /**
-   * Internal method to get list of card IDs for a board
-   */
-  private async getCardIds(boardId: number): Promise<number[]> {
-    const cardIds: number[] = [];
-    let page = 1;
-    const pageSize = 100;
-    let hasMore = true;
-
-    while (hasMore) {
-      const response = await this.request<{
-        data: {
-          pagination: { all_pages: number; current_page: number; results_per_page: number };
-          data: { card_id: number }[];
-        };
-      }>("/cards", {
-        params: {
-          board_ids: boardId,
-          page,
-          per_page: pageSize,
-        },
-      });
-
-      const cards = response.data.data;
-      cardIds.push(...cards.map(c => c.card_id));
-      hasMore = cards.length === pageSize;
-      page++;
-    }
-
-    return cardIds;
-  }
-
-  /**
    * Get a single card with full details
    */
   public async getCard(cardId: number): Promise<KanbanizeCard> {
@@ -332,31 +292,135 @@ export class KanbanizeClient {
   }
 
   /**
+   * Get multiple cards by their IDs with full details
+   * Uses the bulk card_ids parameter to fetch multiple cards in fewer API calls
+   */
+  public async getCardsByIds(
+    cardIds: number[],
+    progressCallback?: (current: number, total: number) => void
+  ): Promise<KanbanizeCard[]> {
+    if (cardIds.length === 0) {
+      return [];
+    }
+
+    const allCards: KanbanizeCard[] = [];
+    const pageSize = 100; // API limits card_ids to reasonable batches
+    const total = cardIds.length;
+
+    // Request all fields needed for linked card details
+    const fields = [
+      "card_id",
+      "custom_id",
+      "board_id",
+      "workflow_id",
+      "title",
+      "description",
+      "column_id",
+      "lane_id",
+      "section",
+      "position",
+      "owner_user_id",
+      "priority",
+      "size",
+      "deadline",
+      "color",
+      "created_at",
+      "last_modified",
+      "first_start_time",
+      "first_end_time",
+    ].join(",");
+
+    for (let i = 0; i < cardIds.length; i += pageSize) {
+      const batch = cardIds.slice(i, i + pageSize);
+      const response = await this.request<{
+        data: {
+          pagination: { all_pages: number; current_page: number; results_per_page: number };
+          data: KanbanizeCard[];
+        };
+      }>("/cards", {
+        params: {
+          card_ids: batch.join(","),
+          fields,
+          expand: "attachments,linked_cards,tag_ids,co_owner_ids",
+        },
+      });
+
+      allCards.push(...response.data.data);
+
+      if (progressCallback) {
+        progressCallback(Math.min(i + pageSize, total), total);
+      }
+    }
+
+    return allCards;
+  }
+
+  /**
    * Get all cards for a board with full details
-   * First fetches card IDs from the list endpoint, then fetches full details for each card
+   * Uses expand parameter to get attachments and linked_cards inline, avoiding N+1 queries
+   * Uses fields parameter to request all needed card properties
+   * Uses per_page=1000 (API maximum) to minimize pagination calls
    */
   public async getCards(
     boardId: number,
     progressCallback?: (current: number, total: number) => void
   ): Promise<KanbanizeCard[]> {
-    // First, get all card IDs from the list endpoint
-    const cardIds = await this.getCardIds(boardId);
-    const total = cardIds.length;
-
-    if (total === 0) {
-      return [];
-    }
-
-    // Then fetch full details for each card
     const allCards: KanbanizeCard[] = [];
-    for (let i = 0; i < cardIds.length; i++) {
-      const cardId = cardIds[i];
-      const card = await this.getCard(cardId);
-      allCards.push(card);
+    let page = 1;
+    const pageSize = 1000; // API maximum
+    let totalPages = 1;
+
+    // Request all fields needed for export
+    const fields = [
+      "card_id",
+      "custom_id",
+      "board_id",
+      "workflow_id",
+      "title",
+      "description",
+      "column_id",
+      "lane_id",
+      "section",
+      "position",
+      "owner_user_id",
+      "priority",
+      "size",
+      "deadline",
+      "color",
+      "created_at",
+      "last_modified",
+      "first_start_time",
+      "first_end_time",
+    ].join(",");
+
+    while (page <= totalPages) {
+      const response = await this.request<{
+        data: {
+          pagination: { all_pages: number; current_page: number; results_per_page: number };
+          data: KanbanizeCard[];
+        };
+      }>("/cards", {
+        params: {
+          board_ids: boardId,
+          page,
+          per_page: pageSize,
+          fields,
+          // Expand related data inline to avoid separate API calls per card
+          expand: "attachments,linked_cards,tag_ids,co_owner_ids",
+        },
+      });
+
+      const { pagination, data: cards } = response.data;
+      totalPages = pagination.all_pages;
+      allCards.push(...cards);
 
       if (progressCallback) {
-        progressCallback(i + 1, total);
+        // Calculate progress based on pagination
+        const progress = Math.min(page * pageSize, allCards.length + (totalPages - page) * pageSize);
+        progressCallback(allCards.length, Math.max(allCards.length, progress));
       }
+
+      page++;
     }
 
     return allCards;
@@ -368,6 +432,78 @@ export class KanbanizeClient {
   public async getCardComments(cardId: number): Promise<KanbanizeComment[]> {
     const response = await this.request<{ data: KanbanizeComment[] }>(`/cards/${cardId}/comments`);
     return response.data;
+  }
+
+  /**
+   * Get comments for multiple cards in bulk
+   * Uses the /cards/comments endpoint with card_ids parameter to minimize API calls
+   * Returns a Map of card_id -> comments for easy lookup
+   */
+  public async getCardCommentsForMultiple(cardIds: number[]): Promise<Map<number, KanbanizeComment[]>> {
+    const commentsMap = new Map<number, KanbanizeComment[]>();
+
+    if (cardIds.length === 0) {
+      return commentsMap;
+    }
+
+    // Initialize empty arrays for all card IDs
+    cardIds.forEach(id => commentsMap.set(id, []));
+
+    let page = 1;
+    const pageSize = 1000; // API maximum
+    let hasMore = true;
+
+    // Response type can vary - handle both direct array and paginated wrapper
+    type CommentWithCardId = KanbanizeComment & { card_id: number };
+    type BulkCommentsResponse =
+      | { data: CommentWithCardId[] }
+      | { data: { pagination?: unknown; data: CommentWithCardId[] } };
+
+    while (hasMore) {
+      const response = await this.request<BulkCommentsResponse>("/cards/comments", {
+        params: {
+          card_ids: cardIds.join(","),
+          page,
+          per_page: pageSize,
+        },
+      });
+
+      // Handle response - could be { data: [...] } or { data: { data: [...], pagination: {...} } }
+      let comments: CommentWithCardId[] = [];
+      if (response.data) {
+        if (Array.isArray(response.data)) {
+          // Direct array: { data: [...] }
+          comments = response.data;
+        } else if (typeof response.data === "object" && "data" in response.data && Array.isArray(response.data.data)) {
+          // Paginated wrapper: { data: { data: [...], pagination: {...} } }
+          comments = response.data.data;
+        }
+      }
+
+      // If no comments or empty response, stop pagination
+      if (comments.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Group comments by card_id
+      for (const comment of comments) {
+        const cardComments = commentsMap.get(comment.card_id) || [];
+        cardComments.push(comment);
+        commentsMap.set(comment.card_id, cardComments);
+      }
+
+      hasMore = comments.length === pageSize;
+      page++;
+    }
+
+    // Sort comments by comment_id for each card
+    for (const [cardId, cardComments] of commentsMap) {
+      cardComments.sort((a, b) => a.comment_id - b.comment_id);
+      commentsMap.set(cardId, cardComments);
+    }
+
+    return commentsMap;
   }
 
   /**
