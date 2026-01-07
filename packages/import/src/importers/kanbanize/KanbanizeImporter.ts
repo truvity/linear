@@ -333,8 +333,8 @@ export class KanbanizeImporter implements Importer {
   private convertComments(card: ExportedCard): Comment[] {
     return card.comments.map(comment => {
       const user = this.exportData.users[comment.author_user_id];
-      // Use user_id as userId
-      const userId = user ? String(user.user_id) : String(comment.author_user_id);
+      // Use email as userId (fallback to user_id if no email)
+      const userId = user?.email || String(comment.author_user_id);
 
       // Convert comment text to Markdown and fix inline image URLs
       let commentBody = htmlToMarkdown(comment.text);
@@ -419,8 +419,8 @@ export class KanbanizeImporter implements Importer {
         continue;
       }
 
-      // Use user_id as the key, not username
-      const userKey = String(user.user_id);
+      // Use email as the key for user identification
+      const userKey = user.email;
 
       // Convert relative avatar URL to absolute URL
       let avatarUrl: string | undefined;
@@ -476,8 +476,8 @@ export class KanbanizeImporter implements Importer {
     for (const card of filteredCards) {
       const column = this.exportData.columns[card.column_id];
       const user = card.owner_user_id ? this.exportData.users[card.owner_user_id] : null;
-      // Use user_id as assigneeId
-      const assigneeId = user ? String(user.user_id) : undefined;
+      // Use email as assigneeId
+      const assigneeId = user?.email;
 
       // Convert tags to label IDs
       const labels = card.tag_ids.map(tagId => String(tagId));
