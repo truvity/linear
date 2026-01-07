@@ -27,39 +27,13 @@ import type {
 export class KanbanizeExporter {
   private client: KanbanizeClient;
   private workspaces: Map<number, KanbanizeWorkspace> = new Map();
-  private activeProgressBars: (cliProgress.MultiBar | cliProgress.SingleBar)[] = [];
-  private cleanupHandlerInstalled = false;
 
   public constructor(client?: KanbanizeClient) {
     this.client = client || new KanbanizeClient();
   }
 
-  /**
-   * Install cleanup handler for Ctrl+C
-   */
-  private installCleanupHandler(): void {
-    if (this.cleanupHandlerInstalled) {
-      return;
-    }
-
-    const cleanup = () => {
-      // Stop all active progress bars
-      for (const bar of this.activeProgressBars) {
-        try {
-          bar.stop();
-        } catch {
-          // Ignore errors during cleanup
-        }
-      }
-      this.activeProgressBars = [];
-
-      console.log(chalk.yellow("\n\nExport cancelled by user"));
-      process.exit(130); // Standard exit code for SIGINT
-    };
-
-    process.on("SIGINT", cleanup);
-    process.on("SIGTERM", cleanup);
-    this.cleanupHandlerInstalled = true;
+  private padOperationName(value: string, targetLength = 23): string {
+    return value.padEnd(targetLength);
   }
 
   /**
@@ -146,9 +120,6 @@ export class KanbanizeExporter {
    * Export a single board to its own directory
    */
   private async exportBoard(boardId: number, baseOutputDir: string): Promise<void> {
-    // Install cleanup handler for Ctrl+C
-    this.installCleanupHandler();
-
     const boardDir = path.join(baseOutputDir, `board-${boardId}`);
     const attachmentsDir = path.join(boardDir, "attachments");
 
@@ -157,13 +128,12 @@ export class KanbanizeExporter {
     // Create a single MultiBar for the entire export process
     const multibar = new cliProgress.MultiBar(
       {
-        clearOnComplete: false,
+        format: "{operation} | {bar} | {percentage}% | {value}/{total}",
         hideCursor: true,
         autopadding: true,
       },
       cliProgress.Presets.shades_classic
     );
-    this.activeProgressBars.push(multibar);
 
     // Create a status bar at the top for rate limit messages (always visible)
     const statusBar = multibar.create(
@@ -172,9 +142,6 @@ export class KanbanizeExporter {
       { text: "" },
       {
         format: "{text}",
-        barCompleteChar: " ",
-        barIncompleteChar: " ",
-        hideCursor: true,
       }
     );
 
@@ -182,12 +149,7 @@ export class KanbanizeExporter {
     this.client.setProgressBar(statusBar);
 
     // Fetch board metadata with progress bar
-    const metadataBar = multibar.create(
-      1,
-      0,
-      {},
-      { format: "Board metadata     [{bar}] {percentage}% | {value}/{total}" }
-    );
+    const metadataBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching board metadata") });
 
     const board = await this.client.getBoard(boardId);
     metadataBar.update(1);
@@ -197,36 +159,11 @@ export class KanbanizeExporter {
 
     // Fetch reference data with progress bars
     // Create progress bars for each operation
-    const usersBar = multibar.create(
-      1,
-      0,
-      { operation: "Users             " },
-      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
-    );
-    const tagsBar = multibar.create(
-      1,
-      0,
-      { operation: "Tags              " },
-      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
-    );
-    const columnsBar = multibar.create(
-      1,
-      0,
-      { operation: "Columns           " },
-      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
-    );
-    const lanesBar = multibar.create(
-      1,
-      0,
-      { operation: "Lanes             " },
-      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
-    );
-    const workflowsBar = multibar.create(
-      1,
-      0,
-      { operation: "Workflows         " },
-      { format: "{operation} [{bar}] {percentage}% | {value}/{total}" }
-    );
+    const usersBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching users") });
+    const tagsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching tags") });
+    const columnsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching columns") });
+    const lanesBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching lanes") });
+    const workflowsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching workflows") });
 
     // Fetch all reference data in parallel with progress tracking
     const [users, tags, columns, lanes, workflows] = await Promise.all([
@@ -281,12 +218,7 @@ export class KanbanizeExporter {
     // Fetch cards with progress bar
     // Get card IDs first to know the total
     const cardIds = await this.client.getCardIdsList(boardId);
-    const cardsProgressBar = multibar.create(
-      cardIds.length,
-      0,
-      {},
-      { format: "Fetching cards     [{bar}] {percentage}% | {value}/{total}" }
-    );
+    const cardsProgressBar = multibar.create(cardIds.length, 0, { operation: this.padOperationName("Fetching cards") });
 
     const cards = await this.client.getCards(boardId, current => {
       cardsProgressBar.update(current);
@@ -295,12 +227,7 @@ export class KanbanizeExporter {
     cardsProgressBar.stop();
 
     // Processing phase with progress bar
-    const processingBar = multibar.create(
-      cards.length,
-      0,
-      {},
-      { format: "Processing cards   [{bar}] {percentage}% | {value}/{total}" }
-    );
+    const processingBar = multibar.create(cards.length, 0, { operation: this.padOperationName("Processing cards") });
 
     // Collect warnings to display after progress bars are stopped
     const warnings: string[] = [];
@@ -558,7 +485,6 @@ export class KanbanizeExporter {
 
     // Clean up MultiBar and all progress bars
     multibar.stop();
-    this.activeProgressBars = this.activeProgressBars.filter(bar => bar !== multibar);
     this.client.setProgressBar(undefined);
 
     // Display all results after multibar is stopped
