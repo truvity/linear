@@ -32,7 +32,7 @@ export class KanbanizeExporter {
     this.client = client || new KanbanizeClient();
   }
 
-  private padOperationName(value: string, targetLength = 23): string {
+  private padOperationName(value: string, targetLength = 25): string {
     return value.padEnd(targetLength);
   }
 
@@ -277,28 +277,79 @@ export class KanbanizeExporter {
     );
 
     if (crossBoardLinkedCardIds.size > 0) {
-      const totalLinkedCards = crossBoardLinkedCardIds.size;
-      const linkedCardsBar = multibar.create(totalLinkedCards, 0, {
-        operation: this.padOperationName("Fetching linked cards"),
+      // Step 1: Initial batch fetch to discover which boards linked cards belong to
+      const discoverBar = multibar.create(crossBoardLinkedCardIds.size, 0, {
+        operation: this.padOperationName("Discovering linked cards"),
       });
 
-      let fetchedCount = 0;
+      const linkedBoardIds = new Set<number>();
 
       try {
-        const crossBoardCards = await this.client.getCardsByIds([...crossBoardLinkedCardIds]);
+        const initialFetch = await this.client.getCardsByIds([...crossBoardLinkedCardIds], current =>
+          discoverBar.update(current)
+        );
 
-        for (const linkedCard of crossBoardCards) {
-          linkedCardCache.set(linkedCard.card_id, {
-            title: linkedCard.title,
-            board_id: linkedCard.board_id,
-            column_name: undefined, // Cross-board cards don't have column info from this board
+        // Collect unique board IDs from linked cards (excluding current board)
+        for (const card of initialFetch) {
+          if (card.board_id !== boardId && !this.client.isBoardFullyCached(card.board_id)) {
+            linkedBoardIds.add(card.board_id);
+          }
+          // Cache the card we already have
+          linkedCardCache.set(card.card_id, {
+            title: card.title,
+            board_id: card.board_id,
+            column_name: undefined,
           });
-          fetchedCount++;
-          linkedCardsBar.update(fetchedCount);
         }
+        discoverBar.update(crossBoardLinkedCardIds.size);
+      } catch (error) {
+        warnings.push(`Failed to discover linked cards: ${error}`);
+      }
+      discoverBar.stop();
 
-        // Check for missing linked cards and try to fetch them individually
-        const missingCardIds = [...crossBoardLinkedCardIds].filter(id => !linkedCardCache.has(id));
+      // Step 2: Prefetch entire boards for linked cards
+      // This is more efficient than fetching individual cards when multiple cards link to the same board
+      if (linkedBoardIds.size > 0) {
+        const prefetchBar = multibar.create(linkedBoardIds.size, 0, {
+          operation: this.padOperationName("Prefetching linked boards"),
+        });
+
+        let boardsFetched = 0;
+        for (const linkedBoardId of linkedBoardIds) {
+          try {
+            await this.client.prefetchBoardCards(linkedBoardId);
+          } catch (error) {
+            warnings.push(`Failed to prefetch board ${linkedBoardId}: ${error}`);
+          }
+          boardsFetched++;
+          prefetchBar.update(boardsFetched);
+        }
+        prefetchBar.stop();
+      }
+
+      // After prefetching (or if boards were already cached), update linkedCardCache
+      // with any cards now available in cache
+      for (const cardId of crossBoardLinkedCardIds) {
+        if (!linkedCardCache.has(cardId)) {
+          const cachedCard = this.client.peekCachedCard(cardId);
+          if (cachedCard) {
+            linkedCardCache.set(cardId, {
+              title: cachedCard.title,
+              board_id: cachedCard.board_id,
+              column_name: undefined,
+            });
+          }
+        }
+      }
+
+      // Step 3: Now fetch any remaining missing cards (deleted/inaccessible)
+      const missingCardIds = [...crossBoardLinkedCardIds].filter(id => !linkedCardCache.has(id));
+      if (missingCardIds.length > 0) {
+        const missingBar = multibar.create(missingCardIds.length, 0, {
+          operation: this.padOperationName("Fetching missing cards"),
+        });
+
+        let fetchedCount = 0;
         for (const missingId of missingCardIds) {
           try {
             const card = await this.client.getCard(missingId);
@@ -311,31 +362,10 @@ export class KanbanizeExporter {
             warnings.push(`Failed to fetch linked card ${missingId}: ${error}`);
           }
           fetchedCount++;
-          linkedCardsBar.update(fetchedCount);
+          missingBar.update(fetchedCount);
         }
-      } catch (error) {
-        warnings.push(`Failed to batch fetch linked cards, trying individually: ${error}`);
-        // Try individual fetches as fallback
-        for (const cardId of crossBoardLinkedCardIds) {
-          if (!linkedCardCache.has(cardId)) {
-            try {
-              const card = await this.client.getCard(cardId);
-              linkedCardCache.set(card.card_id, {
-                title: card.title,
-                board_id: card.board_id,
-                column_name: undefined,
-              });
-            } catch (individualError) {
-              warnings.push(`Failed to fetch linked card ${cardId}: ${individualError}`);
-            }
-          }
-          fetchedCount++;
-          linkedCardsBar.update(fetchedCount);
-        }
+        missingBar.stop();
       }
-
-      linkedCardsBar.update(totalLinkedCards);
-      linkedCardsBar.stop();
     }
 
     // Processing phase with progress bar

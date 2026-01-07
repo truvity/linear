@@ -38,6 +38,8 @@ export class KanbanizeClient {
   // Entity-level caches for cross-method optimization
   private cardCache: Map<number, KanbanizeCard> = new Map();
   private commentCache: Map<number, KanbanizeComment[]> = new Map();
+  // Track which boards have been fully cached (all cards fetched)
+  private fullyCachedBoards: Set<number> = new Set();
 
   public constructor(config: Partial<KanbanizeApiConfig> = {}) {
     this.apiKey = config.apiKey || process.env.KANBANIZE_API_KEY || "";
@@ -74,8 +76,23 @@ export class KanbanizeClient {
     this.cache.clear();
     this.cardCache.clear();
     this.commentCache.clear();
+    this.fullyCachedBoards.clear();
     this.cacheHits = 0;
     this.cacheMisses = 0;
+  }
+
+  /**
+   * Check if a board has been fully cached (all cards fetched)
+   */
+  public isBoardFullyCached(boardId: number): boolean {
+    return this.fullyCachedBoards.has(boardId);
+  }
+
+  /**
+   * Mark a board as fully cached
+   */
+  private markBoardAsFullyCached(boardId: number): void {
+    this.fullyCachedBoards.add(boardId);
   }
 
   /**
@@ -112,7 +129,7 @@ export class KanbanizeClient {
   }
 
   /**
-   * Get a card from entity cache
+   * Get a card from entity cache (internal use, updates stats)
    */
   private getCachedCard(cardId: number): KanbanizeCard | undefined {
     if (!this.cacheEnabled) {
@@ -124,6 +141,17 @@ export class KanbanizeClient {
       return card;
     }
     return undefined;
+  }
+
+  /**
+   * Check if a card is in the cache without updating stats or making API calls
+   * Useful for checking cache state without side effects
+   */
+  public peekCachedCard(cardId: number): KanbanizeCard | undefined {
+    if (!this.cacheEnabled) {
+      return undefined;
+    }
+    return this.cardCache.get(cardId);
   }
 
   /**
@@ -525,7 +553,24 @@ export class KanbanizeClient {
       page++;
     }
 
+    // Mark this board as fully cached so we don't refetch it
+    this.markBoardAsFullyCached(boardId);
+
     return allCards;
+  }
+
+  /**
+   * Prefetch all cards from a board and cache them
+   * Useful for optimizing linked card fetches - fetch entire board once instead of individual cards
+   * Returns the number of cards cached
+   */
+  public async prefetchBoardCards(boardId: number): Promise<number> {
+    if (this.isBoardFullyCached(boardId)) {
+      return 0; // Already cached
+    }
+
+    const cards = await this.getCards(boardId);
+    return cards.length;
   }
 
   /**
