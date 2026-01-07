@@ -107,10 +107,14 @@ export class KanbanizeExporter {
       const savedRequests = finalCacheStats.hits;
       console.log(
         chalk.gray(
-          `\nTotal cache performance: ${finalCacheStats.hits} hits, ${finalCacheStats.misses} misses (${hitRatePercent}% hit rate)`
+          `\nCache: ${finalCacheStats.hits} hits, ${finalCacheStats.misses} misses (${hitRatePercent}% hit rate, ~${savedRequests} API calls saved)`
         )
       );
-      console.log(chalk.gray(`Saved ${savedRequests} API requests through caching`));
+      console.log(
+        chalk.gray(
+          `Cache entries: ${finalCacheStats.cardCacheSize} cards, ${finalCacheStats.commentCacheSize} comment sets, ${finalCacheStats.requestCacheSize} requests`
+        )
+      );
     }
 
     console.log(chalk.green(`\n✓ Export complete! Files saved to ${outputDir}\n`));
@@ -587,7 +591,7 @@ export class KanbanizeExporter {
       const hitRatePercent = (cacheStats.hitRate * 100).toFixed(1);
       console.log(
         chalk.gray(
-          `Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${hitRatePercent}% hit rate, ${cacheStats.size} entries)`
+          `Cache: ${cacheStats.hits} hits, ${cacheStats.misses} misses (${hitRatePercent}% hit rate) | ${cacheStats.cardCacheSize} cards, ${cacheStats.commentCacheSize} comment sets cached`
         )
       );
     }

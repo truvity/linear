@@ -31,10 +31,14 @@ export class KanbanizeClient {
   private progressBar?: SingleBar;
   private cache: Map<string, { data: unknown; timestamp: number }> = new Map();
   private cacheEnabled: boolean = true;
-  private cacheTTL: number = 5 * 60 * 1000; // 5 minutes default TTL
+  private cacheTTL: number = 30 * 60 * 1000; // 30 minutes TTL (data doesn't change during export)
   private cacheHits: number = 0;
   private cacheMisses: number = 0;
   private rateLimitWaitPromise: Promise<void> | null = null;
+
+  // Entity-level caches for cross-method optimization
+  private cardCache: Map<number, KanbanizeCard> = new Map();
+  private commentCache: Map<number, KanbanizeComment[]> = new Map();
 
   public constructor(config: Partial<KanbanizeApiConfig> = {}) {
     this.apiKey = config.apiKey || process.env.KANBANIZE_API_KEY || "";
@@ -69,6 +73,8 @@ export class KanbanizeClient {
    */
   public clearCache(): void {
     this.cache.clear();
+    this.cardCache.clear();
+    this.commentCache.clear();
     this.cacheHits = 0;
     this.cacheMisses = 0;
   }
@@ -76,14 +82,69 @@ export class KanbanizeClient {
   /**
    * Get cache statistics
    */
-  public getCacheStats(): { hits: number; misses: number; size: number; hitRate: number } {
+  public getCacheStats(): {
+    hits: number;
+    misses: number;
+    size: number;
+    hitRate: number;
+    requestCacheSize: number;
+    cardCacheSize: number;
+    commentCacheSize: number;
+  } {
     const total = this.cacheHits + this.cacheMisses;
     return {
       hits: this.cacheHits,
       misses: this.cacheMisses,
-      size: this.cache.size,
+      size: this.cache.size + this.cardCache.size + this.commentCache.size,
       hitRate: total > 0 ? this.cacheHits / total : 0,
+      requestCacheSize: this.cache.size,
+      cardCacheSize: this.cardCache.size,
+      commentCacheSize: this.commentCache.size,
     };
+  }
+
+  /**
+   * Cache a card by its ID for cross-method optimization
+   */
+  private cacheCard(card: KanbanizeCard): void {
+    if (this.cacheEnabled) {
+      this.cardCache.set(card.card_id, card);
+    }
+  }
+
+  /**
+   * Get a card from entity cache
+   */
+  private getCachedCard(cardId: number): KanbanizeCard | undefined {
+    if (!this.cacheEnabled) {return undefined;}
+    const card = this.cardCache.get(cardId);
+    if (card) {
+      this.cacheHits++;
+      return card;
+    }
+    return undefined;
+  }
+
+  /**
+   * Cache comments for a card
+   */
+  private cacheComments(cardId: number, comments: KanbanizeComment[]): void {
+    if (this.cacheEnabled) {
+      this.commentCache.set(cardId, comments);
+    }
+  }
+
+  /**
+   * Get cached comments for a card
+   */
+  private getCachedComments(cardId: number): KanbanizeComment[] | undefined {
+    if (!this.cacheEnabled) {return undefined;}
+    const comments = this.commentCache.get(cardId);
+    if (comments) {
+      this.cacheHits++;
+      return comments;
+    }
+    return undefined;
   }
 
   /**
@@ -285,15 +346,29 @@ export class KanbanizeClient {
 
   /**
    * Get a single card with full details
+   * Uses entity cache for cards previously fetched via bulk methods
    */
   public async getCard(cardId: number): Promise<KanbanizeCard> {
+    // Check entity cache first
+    const cached = this.getCachedCard(cardId);
+    if (cached) {
+      return cached;
+    }
+
+    this.cacheMisses++;
     const response = await this.request<{ data: KanbanizeCard }>(`/cards/${cardId}`);
-    return response.data;
+    const card = response.data;
+
+    // Cache for future use
+    this.cacheCard(card);
+
+    return card;
   }
 
   /**
    * Get multiple cards by their IDs with full details
    * Uses the bulk card_ids parameter to fetch multiple cards in fewer API calls
+   * Filters out already-cached cards to minimize API calls
    */
   public async getCardsByIds(
     cardIds: number[],
@@ -304,8 +379,29 @@ export class KanbanizeClient {
     }
 
     const allCards: KanbanizeCard[] = [];
-    const pageSize = 100; // API limits card_ids to reasonable batches
     const total = cardIds.length;
+
+    // Check cache first and filter out already-cached cards
+    const uncachedIds: number[] = [];
+    for (const cardId of cardIds) {
+      const cached = this.getCachedCard(cardId);
+      if (cached) {
+        allCards.push(cached);
+      } else {
+        this.cacheMisses++;
+        uncachedIds.push(cardId);
+      }
+    }
+
+    // If all cards were cached, return early
+    if (uncachedIds.length === 0) {
+      if (progressCallback) {
+        progressCallback(total, total);
+      }
+      return allCards;
+    }
+
+    const pageSize = 100; // API limits card_ids to reasonable batches
 
     // Request all fields needed for linked card details
     const fields = [
@@ -330,8 +426,10 @@ export class KanbanizeClient {
       "first_end_time",
     ].join(",");
 
-    for (let i = 0; i < cardIds.length; i += pageSize) {
-      const batch = cardIds.slice(i, i + pageSize);
+    let fetchedCount = allCards.length; // Start from cached count
+
+    for (let i = 0; i < uncachedIds.length; i += pageSize) {
+      const batch = uncachedIds.slice(i, i + pageSize);
       const response = await this.request<{
         data: {
           pagination: { all_pages: number; current_page: number; results_per_page: number };
@@ -345,10 +443,15 @@ export class KanbanizeClient {
         },
       });
 
-      allCards.push(...response.data.data);
+      // Cache each fetched card and add to results
+      for (const card of response.data.data) {
+        this.cacheCard(card);
+        allCards.push(card);
+        fetchedCount++;
+      }
 
       if (progressCallback) {
-        progressCallback(Math.min(i + pageSize, total), total);
+        progressCallback(fetchedCount, total);
       }
     }
 
@@ -412,7 +515,12 @@ export class KanbanizeClient {
 
       const { pagination, data: cards } = response.data;
       totalPages = pagination.all_pages;
-      allCards.push(...cards);
+
+      // Cache each card individually for cross-method optimization
+      for (const card of cards) {
+        this.cacheCard(card);
+        allCards.push(card);
+      }
 
       if (progressCallback) {
         // Calculate progress based on pagination
@@ -428,16 +536,30 @@ export class KanbanizeClient {
 
   /**
    * Get comments for a specific card
+   * Uses entity cache for comments previously fetched via bulk method
    */
   public async getCardComments(cardId: number): Promise<KanbanizeComment[]> {
+    // Check entity cache first
+    const cached = this.getCachedComments(cardId);
+    if (cached) {
+      return cached;
+    }
+
+    this.cacheMisses++;
     const response = await this.request<{ data: KanbanizeComment[] }>(`/cards/${cardId}/comments`);
-    return response.data;
+    const comments = response.data;
+
+    // Cache for future use
+    this.cacheComments(cardId, comments);
+
+    return comments;
   }
 
   /**
    * Get comments for multiple cards in bulk
    * Uses the /cards/comments endpoint with card_ids parameter to minimize API calls
    * Returns a Map of card_id -> comments for easy lookup
+   * Utilizes entity cache to skip already-cached cards and caches results
    */
   public async getCardCommentsForMultiple(cardIds: number[]): Promise<Map<number, KanbanizeComment[]>> {
     const commentsMap = new Map<number, KanbanizeComment[]>();
@@ -446,8 +568,23 @@ export class KanbanizeClient {
       return commentsMap;
     }
 
-    // Initialize empty arrays for all card IDs
-    cardIds.forEach(id => commentsMap.set(id, []));
+    // Check cache first and filter out already-cached card comments
+    const uncachedIds: number[] = [];
+    for (const cardId of cardIds) {
+      const cached = this.getCachedComments(cardId);
+      if (cached) {
+        commentsMap.set(cardId, cached);
+      } else {
+        this.cacheMisses++;
+        uncachedIds.push(cardId);
+        commentsMap.set(cardId, []); // Initialize for uncached
+      }
+    }
+
+    // If all comments were cached, return early
+    if (uncachedIds.length === 0) {
+      return commentsMap;
+    }
 
     let page = 1;
     const pageSize = 1000; // API maximum
@@ -462,7 +599,7 @@ export class KanbanizeClient {
     while (hasMore) {
       const response = await this.request<BulkCommentsResponse>("/cards/comments", {
         params: {
-          card_ids: cardIds.join(","),
+          card_ids: uncachedIds.join(","),
           page,
           per_page: pageSize,
         },
@@ -497,10 +634,13 @@ export class KanbanizeClient {
       page++;
     }
 
-    // Sort comments by comment_id for each card
-    for (const [cardId, cardComments] of commentsMap) {
+    // Sort comments by comment_id for each card and cache them
+    for (const cardId of uncachedIds) {
+      const cardComments = commentsMap.get(cardId) || [];
       cardComments.sort((a, b) => a.comment_id - b.comment_id);
       commentsMap.set(cardId, cardComments);
+      // Cache for future use
+      this.cacheComments(cardId, cardComments);
     }
 
     return commentsMap;
