@@ -29,9 +29,8 @@ export class KanbanizeClient {
   private baseUrl: string;
   private requestTimestamps: number[] = [];
   private progressBar?: SingleBar;
-  private cache: Map<string, { data: unknown; timestamp: number }> = new Map();
+  private cache: Map<string, unknown> = new Map();
   private cacheEnabled: boolean = true;
-  private cacheTTL: number = 30 * 60 * 1000; // 30 minutes TTL (data doesn't change during export)
   private cacheHits: number = 0;
   private cacheMisses: number = 0;
   private rateLimitWaitPromise: Promise<void> | null = null;
@@ -116,7 +115,9 @@ export class KanbanizeClient {
    * Get a card from entity cache
    */
   private getCachedCard(cardId: number): KanbanizeCard | undefined {
-    if (!this.cacheEnabled) {return undefined;}
+    if (!this.cacheEnabled) {
+      return undefined;
+    }
     const card = this.cardCache.get(cardId);
     if (card) {
       this.cacheHits++;
@@ -138,7 +139,9 @@ export class KanbanizeClient {
    * Get cached comments for a card
    */
   private getCachedComments(cardId: number): KanbanizeComment[] | undefined {
-    if (!this.cacheEnabled) {return undefined;}
+    if (!this.cacheEnabled) {
+      return undefined;
+    }
     const comments = this.commentCache.get(cardId);
     if (comments) {
       this.cacheHits++;
@@ -161,7 +164,8 @@ export class KanbanizeClient {
   }
 
   /**
-   * Get cached response if available and not expired
+   * Get cached response if available
+   * Cache entries never expire during export (data doesn't change)
    */
   private getCachedResponse<T>(cacheKey: string): T | null {
     if (!this.cacheEnabled) {
@@ -169,35 +173,25 @@ export class KanbanizeClient {
     }
 
     const cached = this.cache.get(cacheKey);
-    if (!cached) {
-      this.cacheMisses++;
-      return null;
-    }
-
-    // Check if cache entry is expired
-    const now = Date.now();
-    if (now - cached.timestamp > this.cacheTTL) {
-      this.cache.delete(cacheKey);
+    if (cached === undefined) {
       this.cacheMisses++;
       return null;
     }
 
     this.cacheHits++;
-    return cached.data as T;
+    return cached as T;
   }
 
   /**
    * Store response in cache
+   * Cache entries persist for the lifetime of the client (no TTL)
    */
   private setCachedResponse(cacheKey: string, data: unknown): void {
     if (!this.cacheEnabled) {
       return;
     }
 
-    this.cache.set(cacheKey, {
-      data,
-      timestamp: Date.now(),
-    });
+    this.cache.set(cacheKey, data);
   }
 
   /**
