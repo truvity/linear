@@ -302,6 +302,42 @@ export class KanbanizeImporter implements Importer {
   }
 
   /**
+   * Replace user mentions with Linear profile links
+   */
+  private replaceUserMentions(text: string): string {
+    // Build a map of Kanbanize username to Linear profile URL
+    const usernameToProfileUrl = new Map<string, string>();
+
+    for (const user of Object.values(this.exportData.users)) {
+      if (user.email) {
+        // Extract the part before @ from email as Linear username
+        const linearUsername = user.email.split("@")[0];
+        const profileUrl = `https://linear.app/truvity/profiles/${linearUsername}`;
+
+        // Map both username and realname to the profile URL
+        if (user.username) {
+          usernameToProfileUrl.set(user.username, profileUrl);
+        }
+        if (user.realname) {
+          usernameToProfileUrl.set(user.realname, profileUrl);
+        }
+      }
+    }
+
+    // Replace @username mentions with Linear profile URLs
+    let result = text;
+    for (const [username, profileUrl] of usernameToProfileUrl.entries()) {
+      // Escape special regex characters in username
+      const escapedUsername = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // Match @username as a whole word (not part of email addresses)
+      const regex = new RegExp(`@\\*\\*${escapedUsername}\\*\\*`, "gi");
+      result = result.replace(regex, profileUrl);
+    }
+
+    return result;
+  }
+
+  /**
    * Build the full description for a card
    */
   private buildDescription(card: ExportedCard): string {
@@ -312,6 +348,8 @@ export class KanbanizeImporter implements Importer {
     if (mdDescription) {
       // Fix relative inline image URLs
       mdDescription = this.fixInlineImageUrls(mdDescription);
+      // Replace user mentions with Linear profile links
+      mdDescription = this.replaceUserMentions(mdDescription);
       parts.push(mdDescription);
     }
 
@@ -339,6 +377,8 @@ export class KanbanizeImporter implements Importer {
       // Convert comment text to Markdown and fix inline image URLs
       let commentBody = htmlToMarkdown(comment.text);
       commentBody = this.fixInlineImageUrls(commentBody);
+      // Replace user mentions with Linear profile links
+      commentBody = this.replaceUserMentions(commentBody);
 
       return {
         body: commentBody,
