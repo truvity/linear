@@ -22,14 +22,105 @@ import type {
 } from "./types.ts";
 
 /**
+ * Manages graceful shutdown on SIGINT/SIGTERM
+ */
+class ExportAbortController {
+  private aborted = false;
+  private activeMultibar: cliProgress.MultiBar | null = null;
+  private signalHandlers: { signal: NodeJS.Signals; handler: NodeJS.SignalsListener }[] = [];
+
+  public get isAborted(): boolean {
+    return this.aborted;
+  }
+
+  public setActiveMultibar(multibar: cliProgress.MultiBar | null): void {
+    this.activeMultibar = multibar;
+  }
+
+  public setupSignalHandlers(): void {
+    const handler = (signal: NodeJS.Signals) => {
+      this.handleSignal(signal);
+    };
+
+    // Register handlers for both SIGINT (Ctrl+C) and SIGTERM
+    for (const signal of ["SIGINT", "SIGTERM"] as NodeJS.Signals[]) {
+      const boundHandler = () => handler(signal);
+      this.signalHandlers.push({ signal, handler: boundHandler });
+      process.on(signal, boundHandler);
+    }
+  }
+
+  public removeSignalHandlers(): void {
+    for (const { signal, handler } of this.signalHandlers) {
+      process.removeListener(signal, handler);
+    }
+    this.signalHandlers = [];
+  }
+
+  private handleSignal(signal: NodeJS.Signals): void {
+    if (this.aborted) {
+      // Second interrupt - force exit
+      console.log(chalk.red("\n\nForce exiting..."));
+      this.restoreTerminal();
+      process.exit(130);
+    }
+
+    this.aborted = true;
+    console.log(chalk.yellow(`\n\nReceived ${signal}, gracefully stopping export...`));
+
+    // Stop and clean up the progress bar
+    if (this.activeMultibar) {
+      this.activeMultibar.stop();
+      this.activeMultibar = null;
+    }
+
+    this.restoreTerminal();
+  }
+
+  private restoreTerminal(): void {
+    // Restore cursor visibility (cli-progress hides it)
+    process.stdout.write("\x1B[?25h");
+    // Clear any partial line
+    process.stdout.write("\r");
+  }
+
+  public cleanup(): void {
+    this.removeSignalHandlers();
+    if (this.activeMultibar) {
+      this.activeMultibar.stop();
+      this.activeMultibar = null;
+    }
+    this.restoreTerminal();
+  }
+
+  public checkAborted(): void {
+    if (this.aborted) {
+      throw new ExportAbortedError("Export was cancelled by user");
+    }
+  }
+}
+
+/**
+ * Error thrown when export is aborted by user
+ */
+export class ExportAbortedError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ExportAbortedError";
+  }
+}
+
+/**
  * Export cards from Kanbanize boards to local JSON files
  */
 export class KanbanizeExporter {
   private client: KanbanizeClient;
   private workspaces: Map<number, KanbanizeWorkspace> = new Map();
+  private abortController: ExportAbortController;
 
   public constructor(client?: KanbanizeClient) {
     this.client = client || new KanbanizeClient();
+    this.abortController = new ExportAbortController();
   }
 
   private padOperationName(value: string, targetLength = 25): string {
@@ -88,36 +179,58 @@ export class KanbanizeExporter {
   public async exportBoards(options: ExportOptions): Promise<void> {
     const { boardIds, outputDir } = options;
 
-    console.log(chalk.blue(`\nExporting ${boardIds.length} board(s) to ${outputDir}\n`));
+    // Set up signal handlers for graceful shutdown
+    this.abortController.setupSignalHandlers();
 
-    // Fetch workspaces for metadata
-    console.log("Fetching workspaces...");
-    const workspaces = await this.client.getWorkspaces();
-    workspaces.forEach(ws => this.workspaces.set(ws.workspace_id, ws));
+    let exportedCount = 0;
 
-    // Export each board
-    for (const boardId of boardIds) {
-      await this.exportBoard(boardId, outputDir);
+    try {
+      console.log(chalk.blue(`\nExporting ${boardIds.length} board(s) to ${outputDir}\n`));
+
+      // Fetch workspaces for metadata
+      console.log("Fetching workspaces...");
+      const workspaces = await this.client.getWorkspaces();
+      workspaces.forEach(ws => this.workspaces.set(ws.workspace_id, ws));
+
+      this.abortController.checkAborted();
+
+      // Export each board
+      for (const boardId of boardIds) {
+        this.abortController.checkAborted();
+        await this.exportBoard(boardId, outputDir);
+        exportedCount++;
+      }
+
+      // Show final cache statistics
+      const finalCacheStats = this.client.getCacheStats();
+      if (finalCacheStats.hits + finalCacheStats.misses > 0) {
+        const hitRatePercent = (finalCacheStats.hitRate * 100).toFixed(1);
+        const savedRequests = finalCacheStats.hits;
+        console.log(
+          chalk.gray(
+            `\nCache: ${finalCacheStats.hits} hits, ${finalCacheStats.misses} misses (${hitRatePercent}% hit rate, ~${savedRequests} API calls saved)`
+          )
+        );
+        console.log(
+          chalk.gray(
+            `Cache entries: ${finalCacheStats.cardCacheSize} cards, ${finalCacheStats.commentCacheSize} comment sets, ${finalCacheStats.requestCacheSize} requests`
+          )
+        );
+      }
+
+      console.log(chalk.green(`\n✓ Export complete! Files saved to ${outputDir}\n`));
+    } catch (error) {
+      if (error instanceof ExportAbortedError) {
+        console.log(
+          chalk.yellow(`\nExport cancelled. ${exportedCount}/${boardIds.length} board(s) were fully exported.\n`)
+        );
+        throw error;
+      }
+      throw error;
+    } finally {
+      // Always clean up signal handlers and restore terminal
+      this.abortController.cleanup();
     }
-
-    // Show final cache statistics
-    const finalCacheStats = this.client.getCacheStats();
-    if (finalCacheStats.hits + finalCacheStats.misses > 0) {
-      const hitRatePercent = (finalCacheStats.hitRate * 100).toFixed(1);
-      const savedRequests = finalCacheStats.hits;
-      console.log(
-        chalk.gray(
-          `\nCache: ${finalCacheStats.hits} hits, ${finalCacheStats.misses} misses (${hitRatePercent}% hit rate, ~${savedRequests} API calls saved)`
-        )
-      );
-      console.log(
-        chalk.gray(
-          `Cache entries: ${finalCacheStats.cardCacheSize} cards, ${finalCacheStats.commentCacheSize} comment sets, ${finalCacheStats.requestCacheSize} requests`
-        )
-      );
-    }
-
-    console.log(chalk.green(`\n✓ Export complete! Files saved to ${outputDir}\n`));
   }
 
   /**
@@ -135,9 +248,13 @@ export class KanbanizeExporter {
         format: "{operation} | {bar} | {percentage}% | {value}/{total}",
         hideCursor: true,
         autopadding: true,
+        gracefulExit: true,
       },
       cliProgress.Presets.shades_classic
     );
+
+    // Register multibar with abort controller for cleanup on interrupt
+    this.abortController.setActiveMultibar(multibar);
 
     // Create a status bar at the top for rate limit messages (always visible)
     const statusBar = multibar.create(
@@ -158,6 +275,7 @@ export class KanbanizeExporter {
     const board = await this.client.getBoard(boardId);
     metadataBar.update(1);
     metadataBar.stop();
+    this.abortController.checkAborted();
 
     const workspace = this.workspaces.get(board.workspace_id);
 
@@ -199,6 +317,7 @@ export class KanbanizeExporter {
     columnsBar.stop();
     lanesBar.stop();
     workflowsBar.stop();
+    this.abortController.checkAborted();
 
     // Create lookup maps
     const usersMap: Record<number, KanbanizeUser> = {};
@@ -242,10 +361,13 @@ export class KanbanizeExporter {
     if (cards.length === 0) {
       // No active cards to process
       multibar.stop();
+      this.abortController.setActiveMultibar(null);
       this.client.setProgressBar(undefined);
       console.log(chalk.yellow(`No active cards found on board ${boardId}`));
       return;
     }
+
+    this.abortController.checkAborted();
 
     // Fetch all comments in bulk (single API call instead of N calls)
     const commentsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching comments") });
@@ -253,6 +375,7 @@ export class KanbanizeExporter {
     const commentsMap = await this.client.getCardCommentsForMultiple(cardIds);
     commentsBar.update(1);
     commentsBar.stop();
+    this.abortController.checkAborted();
 
     // Collect all unique cross-board linked card IDs for batch fetching
     const crossBoardLinkedCardIds = new Set<number>();
@@ -315,6 +438,7 @@ export class KanbanizeExporter {
         warnings.push(`Failed to discover linked cards: ${error}`);
       }
       discoverBar.stop();
+      this.abortController.checkAborted();
 
       // Step 2: Prefetch entire boards for linked cards
       // This is more efficient than fetching individual cards when multiple cards link to the same board
@@ -334,6 +458,7 @@ export class KanbanizeExporter {
           prefetchBar.update(boardsFetched);
         }
         prefetchBar.stop();
+        this.abortController.checkAborted();
       }
 
       // After prefetching (or if boards were already cached), update linkedCardCache
@@ -381,6 +506,7 @@ export class KanbanizeExporter {
     const processingBar = multibar.create(cards.length, 0, { operation: this.padOperationName("Processing cards") });
 
     for (const card of cards) {
+      this.abortController.checkAborted();
       // Get comments from the bulk-fetched map (ensure it's an array)
       const commentsFromMap = commentsMap.get(card.card_id);
       const comments = Array.isArray(commentsFromMap) ? commentsFromMap : [];
@@ -611,6 +737,7 @@ export class KanbanizeExporter {
 
     // Clean up MultiBar and all progress bars
     multibar.stop();
+    this.abortController.setActiveMultibar(null);
     this.client.setProgressBar(undefined);
 
     // Display all results after multibar is stopped
@@ -648,5 +775,13 @@ export class KanbanizeExporter {
  */
 export async function runExport(options: ExportOptions): Promise<void> {
   const exporter = new KanbanizeExporter();
-  await exporter.exportBoards(options);
+  try {
+    await exporter.exportBoards(options);
+  } catch (error) {
+    if (error instanceof ExportAbortedError) {
+      // Exit with code 130 (128 + SIGINT signal number 2)
+      process.exit(130);
+    }
+    throw error;
+  }
 }
