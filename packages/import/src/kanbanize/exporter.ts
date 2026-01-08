@@ -237,6 +237,7 @@ export class KanbanizeExporter {
    * Export a single board to its own directory
    */
   private async exportBoard(boardId: number, baseOutputDir: string): Promise<void> {
+    const startTime = Date.now();
     const boardDir = path.join(baseOutputDir, `board-${boardId}`);
     const attachmentsDir = path.join(boardDir, "attachments");
 
@@ -767,6 +768,34 @@ export class KanbanizeExporter {
       console.log(chalk.yellow(`\n⚠ ${warnings.length} warning(s) occurred during export:`));
       warnings.forEach(warning => console.log(chalk.yellow(`  - ${warning}`)));
     }
+
+    // Display export time
+    const elapsedMs = Date.now() - startTime;
+    console.log(chalk.cyan(`⏱ Board ${boardId} exported in ${this.formatDuration(elapsedMs)}`));
+  }
+
+  /**
+   * Format milliseconds into a human-readable duration string
+   */
+  private formatDuration(ms: number): string {
+    if (ms < 1000) {
+      return `${ms}ms`;
+    }
+
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) {
+      return `${seconds}s`;
+    }
+
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    if (minutes < 60) {
+      return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+    }
+
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
   }
 }
 
