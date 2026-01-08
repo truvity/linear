@@ -13,6 +13,7 @@ import type {
   KanbanizeBoardExport,
   KanbanizeBoardMetadata,
   KanbanizeColumn,
+  KanbanizeComment,
   KanbanizeLane,
   KanbanizeLinkedCard,
   KanbanizeTag,
@@ -336,12 +337,6 @@ export class KanbanizeExporter {
     const workflowsMap: Record<number, KanbanizeWorkflow> = {};
     workflows.forEach(w => (workflowsMap[w.workflow_id] = w));
 
-    // Process each card (fetch comments, download attachments)
-    const exportedCards: ExportedCard[] = [];
-
-    // Collect warnings to display after progress bars are stopped
-    const warnings: string[] = [];
-
     // Fetch active cards with progress bar (these will be exported)
     const cardsProgressBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching active cards") });
     const cards = await this.client.getCards(boardId, (current, total) => {
@@ -359,315 +354,309 @@ export class KanbanizeExporter {
     cacheBar.update(2);
     cacheBar.stop();
 
-    if (cards.length === 0) {
-      // No active cards to process
-      multibar.stop();
-      this.abortController.setActiveMultibar(null);
-      this.client.setProgressBar(undefined);
-      console.log(chalk.yellow(`No active cards found on board ${boardId}`));
-      return;
-    }
+    // Process each card (fetch comments, download attachments)
+    const exportedCards: ExportedCard[] = [];
 
-    this.abortController.checkAborted();
-
-    // Fetch all comments in bulk (single API call instead of N calls)
-    const commentsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching comments") });
-    const cardIds = cards.map(c => c.card_id);
-    const commentsMap = await this.client.getCardCommentsForMultiple(cardIds);
-    commentsBar.update(1);
-    commentsBar.stop();
-    this.abortController.checkAborted();
-
-    // Collect all unique cross-board linked card IDs for batch fetching
-    const crossBoardLinkedCardIds = new Set<number>();
-    const sameBoardLinkedCards = new Map<number, { title: string; board_id: number; column_name?: string }>();
-
-    // First pass: identify which linked cards are from other boards
-    for (const card of cards) {
-      if (card.linked_cards && card.linked_cards.length > 0) {
-        for (const link of card.linked_cards) {
-          // Check if linked card is from the same board (we already have its data)
-          const linkedCardInSameBoard = cards.find(c => c.card_id === link.card_id);
-          if (linkedCardInSameBoard) {
-            // Cache same-board linked card details from already-fetched data
-            const linkedCardColumn = columnsMap[linkedCardInSameBoard.column_id];
-            sameBoardLinkedCards.set(link.card_id, {
-              title: linkedCardInSameBoard.title,
-              board_id: linkedCardInSameBoard.board_id,
-              column_name: linkedCardColumn?.name,
-            });
-          } else {
-            // Need to fetch from other board
-            crossBoardLinkedCardIds.add(link.card_id);
-          }
-        }
-      }
-    }
-
-    // Batch fetch cross-board linked cards if any
-    const linkedCardCache = new Map<number, { title: string; board_id: number; column_name?: string }>(
-      sameBoardLinkedCards
-    );
-
-    if (crossBoardLinkedCardIds.size > 0) {
-      // Step 1: Initial batch fetch to discover which boards linked cards belong to
-      const discoverBar = multibar.create(crossBoardLinkedCardIds.size, 0, {
-        operation: this.padOperationName("Discovering linked cards"),
-      });
-
-      const linkedBoardIds = new Set<number>();
-
-      try {
-        const initialFetch = await this.client.getCardsByIds([...crossBoardLinkedCardIds], current =>
-          discoverBar.update(current)
-        );
-
-        // Collect unique board IDs from linked cards (excluding current board)
-        for (const card of initialFetch) {
-          if (card.board_id !== boardId && !this.client.isBoardFullyCached(card.board_id)) {
-            linkedBoardIds.add(card.board_id);
-          }
-          // Cache the card we already have
-          linkedCardCache.set(card.card_id, {
-            title: card.title,
-            board_id: card.board_id,
-            column_name: undefined,
-          });
-        }
-        discoverBar.update(crossBoardLinkedCardIds.size);
-      } catch (error) {
-        warnings.push(`Failed to discover linked cards: ${error}`);
-      }
-      discoverBar.stop();
-      this.abortController.checkAborted();
-
-      // Step 2: Prefetch entire boards for linked cards
-      // This is more efficient than fetching individual cards when multiple cards link to the same board
-      if (linkedBoardIds.size > 0) {
-        const prefetchBar = multibar.create(linkedBoardIds.size, 0, {
-          operation: this.padOperationName("Prefetching linked boards"),
-        });
-
-        let boardsFetched = 0;
-        for (const linkedBoardId of linkedBoardIds) {
-          try {
-            await this.client.prefetchBoardCards(linkedBoardId);
-          } catch (error) {
-            warnings.push(`Failed to prefetch board ${linkedBoardId}: ${error}`);
-          }
-          boardsFetched++;
-          prefetchBar.update(boardsFetched);
-        }
-        prefetchBar.stop();
-        this.abortController.checkAborted();
-      }
-
-      // After prefetching (or if boards were already cached), update linkedCardCache
-      // with any cards now available in cache
-      for (const cardId of crossBoardLinkedCardIds) {
-        if (!linkedCardCache.has(cardId)) {
-          const cachedCard = this.client.peekCachedCard(cardId);
-          if (cachedCard) {
-            linkedCardCache.set(cardId, {
-              title: cachedCard.title,
-              board_id: cachedCard.board_id,
-              column_name: undefined,
-            });
-          }
-        }
-      }
-
-      // Step 3: Now fetch any remaining missing cards (deleted/inaccessible)
-      const missingCardIds = [...crossBoardLinkedCardIds].filter(id => !linkedCardCache.has(id));
-      if (missingCardIds.length > 0) {
-        const missingBar = multibar.create(missingCardIds.length, 0, {
-          operation: this.padOperationName("Fetching missing cards"),
-        });
-
-        let fetchedCount = 0;
-        for (const missingId of missingCardIds) {
-          try {
-            const card = await this.client.getCard(missingId);
-            linkedCardCache.set(card.card_id, {
-              title: card.title,
-              board_id: card.board_id,
-              column_name: undefined,
-            });
-          } catch (error) {
-            warnings.push(`Failed to fetch linked card ${missingId}: ${error}`);
-          }
-          fetchedCount++;
-          missingBar.update(fetchedCount);
-        }
-        missingBar.stop();
-      }
-    }
-
-    // Processing phase with progress bar
-    const processingBar = multibar.create(cards.length, 0, { operation: this.padOperationName("Processing cards") });
-
-    for (const card of cards) {
-      this.abortController.checkAborted();
-      // Get comments from the bulk-fetched map (ensure it's an array)
-      const commentsFromMap = commentsMap.get(card.card_id);
-      const comments = Array.isArray(commentsFromMap) ? commentsFromMap : [];
-
-      // Process attachments
-      const exportedAttachments: ExportedAttachment[] = [];
-      if (card.attachments && card.attachments.length > 0) {
-        for (const attachment of card.attachments) {
-          const localPath = `${card.card_id}/${attachment.id}_${attachment.file_name}`;
-          const fullPath = path.join(attachmentsDir, localPath);
-
-          try {
-            await this.client.downloadAttachment(attachment.link, fullPath);
-            exportedAttachments.push({
-              id: attachment.id,
-              file_name: attachment.file_name,
-              original_link: attachment.link,
-              local_path: localPath,
-            });
-          } catch (error) {
-            warnings.push(`Failed to download attachment ${attachment.file_name}: ${error}`);
-            // Still record the attachment but mark local_path as empty
-            exportedAttachments.push({
-              id: attachment.id,
-              file_name: attachment.file_name,
-              original_link: attachment.link,
-              local_path: "", // Empty indicates download failed
-            });
-          }
-        }
-      }
-
-      // Process comments and their attachments
-      const exportedComments: ExportedComment[] = [];
-      for (const comment of comments) {
-        const commentAttachments: ExportedCommentAttachment[] = [];
-
-        if (comment.attachments && comment.attachments.length > 0) {
-          for (const attachment of comment.attachments) {
-            const localPath = `${card.card_id}/comments/${comment.comment_id}_${attachment.id}_${attachment.file_name}`;
-            const fullPath = path.join(attachmentsDir, localPath);
-
-            try {
-              await this.client.downloadAttachment(attachment.link, fullPath);
-              commentAttachments.push({
-                id: attachment.id,
-                file_name: attachment.file_name,
-                local_path: localPath,
-              });
-            } catch (error) {
-              warnings.push(`Failed to download comment attachment ${attachment.file_name}: ${error}`);
-              commentAttachments.push({
-                id: attachment.id,
-                file_name: attachment.file_name,
-                local_path: "",
-              });
-            }
-          }
-        }
-
-        // Process inline images in comment text
-        const processedCommentText = await this.processInlineImages(comment.text, card.card_id, warnings);
-
-        exportedComments.push({
-          comment_id: comment.comment_id,
-          text: processedCommentText,
-          author_user_id: comment.author?.value || 0,
-          created_at: comment.created_at,
-          attachments: commentAttachments,
-        });
-      }
-
-      // Enrich linked cards with details from cache (already batch-fetched)
-      const enrichedLinkedCards: KanbanizeLinkedCard[] = [];
-      if (card.linked_cards && card.linked_cards.length > 0) {
-        for (const link of card.linked_cards) {
-          const enrichedLink: KanbanizeLinkedCard = {
-            card_id: link.card_id,
-            link_type: link.link_type,
-          };
-
-          const cachedDetails = linkedCardCache.get(link.card_id);
-          if (cachedDetails) {
-            enrichedLink.title = cachedDetails.title;
-            enrichedLink.board_id = cachedDetails.board_id;
-            enrichedLink.column_name = cachedDetails.column_name;
-          }
-
-          enrichedLinkedCards.push(enrichedLink);
-        }
-      }
-
-      // Process inline images in card description
-      const processedDescription = await this.processInlineImages(card.description || "", card.card_id, warnings);
-
-      // Build exported card
-      const exportedCard: ExportedCard = {
-        card_id: card.card_id,
-        custom_id: card.custom_id,
-        board_id: card.board_id,
-        workflow_id: card.workflow_id,
-        title: card.title,
-        description: processedDescription,
-        column_id: card.column_id,
-        lane_id: card.lane_id,
-        section: card.section,
-        position: card.position,
-        owner_user_id: card.owner_user_id,
-        co_owner_ids: card.co_owner_ids || [],
-        priority: card.priority,
-        size: card.size,
-        deadline: card.deadline,
-        color: card.color,
-        created_at: card.created_at,
-        last_modified: card.last_modified,
-        first_start_time: card.first_start_time,
-        first_end_time: card.first_end_time,
-        tag_ids: card.tag_ids || [],
-        linked_cards: enrichedLinkedCards,
-        attachments: exportedAttachments,
-        comments: exportedComments,
-      };
-
-      exportedCards.push(exportedCard);
-
-      // Update progress counter
-      processingBar.update(exportedCards.length);
-    }
-
-    // Stop the processing bar
-    processingBar.stop();
+    // Collect warnings to display after progress bars are stopped
+    const warnings: string[] = [];
 
     // Collect used user IDs and tag IDs
     const usedUserIds = new Set<number>();
     const usedTagIds = new Set<number>();
 
-    for (const card of exportedCards) {
-      // Collect owner
-      if (card.owner_user_id) {
-        usedUserIds.add(card.owner_user_id);
+    // Track if board has no active cards (message displayed after progress bars stop)
+    const hasNoActiveCards = cards.length === 0;
+
+    // Variables for card processing (initialized for the cards.length > 0 case)
+    let commentsMap = new Map<number, KanbanizeComment[]>();
+    const linkedCardCache = new Map<number, { title: string; board_id: number; column_name?: string }>();
+
+    if (cards.length > 0) {
+      this.abortController.checkAborted();
+
+      // Fetch all comments in bulk (single API call instead of N calls)
+      const commentsBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching comments") });
+      const cardIds = cards.map(c => c.card_id);
+      commentsMap = await this.client.getCardCommentsForMultiple(cardIds);
+      commentsBar.update(1);
+      commentsBar.stop();
+      this.abortController.checkAborted();
+
+      // Collect all unique cross-board linked card IDs for batch fetching
+      const crossBoardLinkedCardIds = new Set<number>();
+      const sameBoardLinkedCards = new Map<number, { title: string; board_id: number; column_name?: string }>();
+
+      // First pass: identify which linked cards are from other boards
+      for (const card of cards) {
+        if (card.linked_cards && card.linked_cards.length > 0) {
+          for (const link of card.linked_cards) {
+            // Check if linked card is from the same board (we already have its data)
+            const linkedCardInSameBoard = cards.find(c => c.card_id === link.card_id);
+            if (linkedCardInSameBoard) {
+              // Cache same-board linked card details from already-fetched data
+              const linkedCardColumn = columnsMap[linkedCardInSameBoard.column_id];
+              sameBoardLinkedCards.set(link.card_id, {
+                title: linkedCardInSameBoard.title,
+                board_id: linkedCardInSameBoard.board_id,
+                column_name: linkedCardColumn?.name,
+              });
+            } else {
+              // Need to fetch from other board
+              crossBoardLinkedCardIds.add(link.card_id);
+            }
+          }
+        }
       }
 
-      // Collect co-owners
-      if (card.co_owner_ids && card.co_owner_ids.length > 0) {
-        card.co_owner_ids.forEach(id => usedUserIds.add(id));
+      // Initialize linkedCardCache with same-board linked cards
+      sameBoardLinkedCards.forEach((value, key) => linkedCardCache.set(key, value));
+
+      if (crossBoardLinkedCardIds.size > 0) {
+        // Step 1: Initial batch fetch to discover which boards linked cards belong to
+        const discoverBar = multibar.create(crossBoardLinkedCardIds.size, 0, {
+          operation: this.padOperationName("Discovering linked cards"),
+        });
+
+        const linkedBoardIds = new Set<number>();
+
+        try {
+          const initialFetch = await this.client.getCardsByIds([...crossBoardLinkedCardIds], current =>
+            discoverBar.update(current)
+          );
+
+          // Collect unique board IDs from linked cards (excluding current board)
+          for (const card of initialFetch) {
+            if (card.board_id !== boardId && !this.client.isBoardFullyCached(card.board_id)) {
+              linkedBoardIds.add(card.board_id);
+            }
+            // Cache the card we already have
+            linkedCardCache.set(card.card_id, {
+              title: card.title,
+              board_id: card.board_id,
+              column_name: undefined,
+            });
+          }
+          discoverBar.update(crossBoardLinkedCardIds.size);
+        } catch (error) {
+          warnings.push(`Failed to discover linked cards: ${error}`);
+        }
+        discoverBar.stop();
+        this.abortController.checkAborted();
+
+        // Step 2: Prefetch entire boards for linked cards
+        // This is more efficient than fetching individual cards when multiple cards link to the same board
+        if (linkedBoardIds.size > 0) {
+          const prefetchBar = multibar.create(linkedBoardIds.size, 0, {
+            operation: this.padOperationName("Prefetching linked boards"),
+          });
+
+          let boardsFetched = 0;
+          for (const linkedBoardId of linkedBoardIds) {
+            try {
+              await this.client.prefetchBoardCards(linkedBoardId);
+            } catch (error) {
+              warnings.push(`Failed to prefetch board ${linkedBoardId}: ${error}`);
+            }
+            boardsFetched++;
+            prefetchBar.update(boardsFetched);
+          }
+          prefetchBar.stop();
+          this.abortController.checkAborted();
+        }
+
+        // After prefetching (or if boards were already cached), update linkedCardCache
+        // with any cards now available in cache
+        for (const cardId of crossBoardLinkedCardIds) {
+          if (!linkedCardCache.has(cardId)) {
+            const cachedCard = this.client.peekCachedCard(cardId);
+            if (cachedCard) {
+              linkedCardCache.set(cardId, {
+                title: cachedCard.title,
+                board_id: cachedCard.board_id,
+                column_name: undefined,
+              });
+            }
+          }
+        }
+
+        // Step 3: Now fetch any remaining missing cards (deleted/inaccessible)
+        const missingCardIds = [...crossBoardLinkedCardIds].filter(id => !linkedCardCache.has(id));
+        if (missingCardIds.length > 0) {
+          const missingBar = multibar.create(missingCardIds.length, 0, {
+            operation: this.padOperationName("Fetching missing cards"),
+          });
+
+          let fetchedCount = 0;
+          for (const missingId of missingCardIds) {
+            try {
+              const card = await this.client.getCard(missingId);
+              linkedCardCache.set(card.card_id, {
+                title: card.title,
+                board_id: card.board_id,
+                column_name: undefined,
+              });
+            } catch (error) {
+              warnings.push(`Failed to fetch linked card ${missingId}: ${error}`);
+            }
+            fetchedCount++;
+            missingBar.update(fetchedCount);
+          }
+          missingBar.stop();
+        }
       }
 
-      // Collect comment authors
-      if (card.comments && card.comments.length > 0) {
-        card.comments.forEach(comment => {
+      // Processing phase with progress bar
+      const processingBar = multibar.create(cards.length, 0, { operation: this.padOperationName("Processing cards") });
+
+      for (const card of cards) {
+        this.abortController.checkAborted();
+        // Get comments from the bulk-fetched map (ensure it's an array)
+        const commentsFromMap = commentsMap.get(card.card_id);
+        const comments = Array.isArray(commentsFromMap) ? commentsFromMap : [];
+
+        // Process attachments
+        const exportedAttachments: ExportedAttachment[] = [];
+        if (card.attachments && card.attachments.length > 0) {
+          for (const attachment of card.attachments) {
+            const localPath = `${card.card_id}/${attachment.id}_${attachment.file_name}`;
+            const fullPath = path.join(attachmentsDir, localPath);
+
+            try {
+              await this.client.downloadAttachment(attachment.link, fullPath);
+              exportedAttachments.push({
+                id: attachment.id,
+                file_name: attachment.file_name,
+                original_link: attachment.link,
+                local_path: localPath,
+              });
+            } catch (error) {
+              warnings.push(`Failed to download attachment ${attachment.file_name}: ${error}`);
+              // Still record the attachment but mark local_path as empty
+              exportedAttachments.push({
+                id: attachment.id,
+                file_name: attachment.file_name,
+                original_link: attachment.link,
+                local_path: "", // Empty indicates download failed
+              });
+            }
+          }
+        }
+
+        // Process comments and their attachments
+        const exportedComments: ExportedComment[] = [];
+        for (const comment of comments) {
+          const commentAttachments: ExportedCommentAttachment[] = [];
+
+          if (comment.attachments && comment.attachments.length > 0) {
+            for (const attachment of comment.attachments) {
+              const localPath = `${card.card_id}/comments/${comment.comment_id}_${attachment.id}_${attachment.file_name}`;
+              const fullPath = path.join(attachmentsDir, localPath);
+
+              try {
+                await this.client.downloadAttachment(attachment.link, fullPath);
+                commentAttachments.push({
+                  id: attachment.id,
+                  file_name: attachment.file_name,
+                  local_path: localPath,
+                });
+              } catch (error) {
+                warnings.push(`Failed to download comment attachment ${attachment.file_name}: ${error}`);
+                commentAttachments.push({
+                  id: attachment.id,
+                  file_name: attachment.file_name,
+                  local_path: "",
+                });
+              }
+            }
+          }
+
+          // Process inline images in comment text
+          const processedCommentText = await this.processInlineImages(comment.text, card.card_id, warnings);
+
+          exportedComments.push({
+            comment_id: comment.comment_id,
+            text: processedCommentText,
+            author_user_id: comment.author?.value || 0,
+            created_at: comment.created_at,
+            attachments: commentAttachments,
+          });
+        }
+
+        // Enrich linked cards with details from cache (already batch-fetched)
+        const enrichedLinkedCards: KanbanizeLinkedCard[] = [];
+        if (card.linked_cards && card.linked_cards.length > 0) {
+          for (const link of card.linked_cards) {
+            const enrichedLink: KanbanizeLinkedCard = {
+              card_id: link.card_id,
+              link_type: link.link_type,
+            };
+
+            const cachedDetails = linkedCardCache.get(link.card_id);
+            if (cachedDetails) {
+              enrichedLink.title = cachedDetails.title;
+              enrichedLink.board_id = cachedDetails.board_id;
+              enrichedLink.column_name = cachedDetails.column_name;
+            }
+
+            enrichedLinkedCards.push(enrichedLink);
+          }
+        }
+
+        // Process inline images in card description
+        const processedDescription = await this.processInlineImages(card.description || "", card.card_id, warnings);
+
+        // Build exported card
+        const exportedCard: ExportedCard = {
+          card_id: card.card_id,
+          custom_id: card.custom_id,
+          board_id: card.board_id,
+          workflow_id: card.workflow_id,
+          title: card.title,
+          description: processedDescription,
+          column_id: card.column_id,
+          lane_id: card.lane_id,
+          section: card.section,
+          position: card.position,
+          owner_user_id: card.owner_user_id,
+          co_owner_ids: card.co_owner_ids || [],
+          priority: card.priority,
+          size: card.size,
+          deadline: card.deadline,
+          color: card.color,
+          created_at: card.created_at,
+          last_modified: card.last_modified,
+          first_start_time: card.first_start_time,
+          first_end_time: card.first_end_time,
+          tag_ids: card.tag_ids || [],
+          linked_cards: enrichedLinkedCards,
+          attachments: exportedAttachments,
+          comments: exportedComments,
+        };
+
+        exportedCards.push(exportedCard);
+
+        // Collect used user IDs and tag IDs as we process
+        if (card.owner_user_id) {
+          usedUserIds.add(card.owner_user_id);
+        }
+        if (card.co_owner_ids && card.co_owner_ids.length > 0) {
+          card.co_owner_ids.forEach(id => usedUserIds.add(id));
+        }
+        exportedComments.forEach(comment => {
           if (comment.author_user_id) {
             usedUserIds.add(comment.author_user_id);
           }
         });
+        if (card.tag_ids && card.tag_ids.length > 0) {
+          card.tag_ids.forEach(tagId => usedTagIds.add(tagId));
+        }
+
+        // Update progress counter
+        processingBar.update(exportedCards.length);
       }
 
-      // Collect tags
-      if (card.tag_ids && card.tag_ids.length > 0) {
-        card.tag_ids.forEach(tagId => usedTagIds.add(tagId));
-      }
+      // Stop the processing bar
+      processingBar.stop();
     }
 
     // Filter users to only include used ones
@@ -742,6 +731,9 @@ export class KanbanizeExporter {
     this.client.setProgressBar(undefined);
 
     // Display all results after multibar is stopped
+    if (hasNoActiveCards) {
+      console.log(chalk.yellow(`No active cards found on board ${boardId}`));
+    }
     console.log(
       chalk.gray(
         `Filtered to ${usedUserIds.size} users (from ${Object.keys(usersMap).length}) and ${usedTagIds.size} tags (from ${Object.keys(tagsMap).length})`
