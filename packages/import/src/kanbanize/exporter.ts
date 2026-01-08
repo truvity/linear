@@ -222,19 +222,28 @@ export class KanbanizeExporter {
     // Collect warnings to display after progress bars are stopped
     const warnings: string[] = [];
 
-    // Fetch cards with progress bar (now uses expand parameter internally for attachments & linked_cards)
-    const cardsProgressBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching cards") });
+    // Fetch active cards with progress bar (these will be exported)
+    const cardsProgressBar = multibar.create(1, 0, { operation: this.padOperationName("Fetching active cards") });
     const cards = await this.client.getCards(boardId, (current, total) => {
       cardsProgressBar.setTotal(total);
       cardsProgressBar.update(current);
     });
     cardsProgressBar.stop();
 
+    // Also fetch archived and discarded cards to cache them (for linked card lookups)
+    // These won't be exported, just cached so linked cards can find them
+    const cacheBar = multibar.create(2, 0, { operation: this.padOperationName("Fetching archived cards") });
+    await this.client.getCardsByState(boardId, "archived");
+    cacheBar.update(1);
+    await this.client.getCardsByState(boardId, "discarded");
+    cacheBar.update(2);
+    cacheBar.stop();
+
     if (cards.length === 0) {
-      // No cards to process
+      // No active cards to process
       multibar.stop();
       this.client.setProgressBar(undefined);
-      console.log(chalk.yellow(`No cards found on board ${boardId}`));
+      console.log(chalk.yellow(`No active cards found on board ${boardId}`));
       return;
     }
 

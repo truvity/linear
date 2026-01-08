@@ -553,15 +553,13 @@ export class KanbanizeClient {
       page++;
     }
 
-    // Mark this board as fully cached so we don't refetch it
-    this.markBoardAsFullyCached(boardId);
-
     return allCards;
   }
 
   /**
-   * Prefetch all cards from a board and cache them
+   * Prefetch all cards from a board (including archived and discarded) and cache them
    * Useful for optimizing linked card fetches - fetch entire board once instead of individual cards
+   * Fetches all card states to ensure linked cards are found regardless of their state
    * Returns the number of cards cached
    */
   public async prefetchBoardCards(boardId: number): Promise<number> {
@@ -569,8 +567,87 @@ export class KanbanizeClient {
       return 0; // Already cached
     }
 
-    const cards = await this.getCards(boardId);
-    return cards.length;
+    // Fetch all card states to ensure we cache archived/discarded linked cards too
+    const states: ("active" | "archived" | "discarded")[] = ["active", "archived", "discarded"];
+    let totalCached = 0;
+
+    for (const state of states) {
+      const cards = await this.getCardsByState(boardId, state);
+      totalCached += cards.length;
+    }
+
+    // Mark board as fully cached after fetching all states
+    this.markBoardAsFullyCached(boardId);
+
+    return totalCached;
+  }
+
+  /**
+   * Get cards for a board filtered by state
+   * Used for fetching archived/discarded cards to populate cache
+   */
+  public async getCardsByState(boardId: number, state: "active" | "archived" | "discarded"): Promise<KanbanizeCard[]> {
+    const allCards: KanbanizeCard[] = [];
+    let page = 1;
+    const pageSize = 1000;
+    let totalPages = 1;
+
+    // Request all fields needed for export
+    const fields = [
+      "card_id",
+      "custom_id",
+      "board_id",
+      "workflow_id",
+      "title",
+      "description",
+      "column_id",
+      "lane_id",
+      "section",
+      "position",
+      "owner_user_id",
+      "priority",
+      "size",
+      "deadline",
+      "color",
+      "created_at",
+      "last_modified",
+      "first_start_time",
+      "first_end_time",
+      "archived_at",
+      "last_column_id",
+      "last_lane_id",
+    ].join(",");
+
+    while (page <= totalPages) {
+      const response = await this.request<{
+        data: {
+          pagination: { all_pages: number; current_page: number; results_per_page: number };
+          data: KanbanizeCard[];
+        };
+      }>("/cards", {
+        params: {
+          board_ids: boardId,
+          state,
+          page,
+          per_page: pageSize,
+          fields,
+          expand: "attachments,linked_cards,tag_ids,co_owner_ids",
+        },
+      });
+
+      const { pagination, data: cards } = response.data;
+      totalPages = pagination.all_pages;
+
+      // Cache each card individually
+      for (const card of cards) {
+        this.cacheCard(card);
+        allCards.push(card);
+      }
+
+      page++;
+    }
+
+    return allCards;
   }
 
   /**
