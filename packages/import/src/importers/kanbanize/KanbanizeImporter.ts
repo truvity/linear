@@ -116,11 +116,14 @@ export class KanbanizeImporter implements Importer {
     }
 
     // Use custom status mapping if provided
-    if (this.statusMapping && this.statusMapping[column.name]) {
-      return this.statusMapping[column.name];
+    let statusName = this.statusMapping?.[column.name] || column.name;
+
+    // Linear has a 30-character limit for workflow state names
+    if (statusName.length > 30) {
+      statusName = statusName.substring(0, 30);
     }
 
-    return column.name;
+    return statusName;
   }
 
   /**
