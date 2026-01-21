@@ -488,8 +488,11 @@ const buildComments = async (
     const user = importData.users[comment.userId];
     const date = comment.createdAt ? comment.createdAt.toISOString().split("T")[0] : undefined;
 
+    // Use fallback name if user doesn't exist (e.g., users without email)
+    const userName = user?.name || `User ${comment.userId}`;
+
     const body = await replaceImagesInMarkdown(client, comment.body || "", importData.resourceURLSuffix);
-    newComments.push(`**${user.name}**${" " + date}\n\n${body}\n`);
+    newComments.push(`**${userName}**${" " + date}\n\n${body}\n`);
   }
 
   if (newComments.length === 0) {
