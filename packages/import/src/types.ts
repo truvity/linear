@@ -2,6 +2,8 @@ export type IssuePriority = 0 | 1 | 2 | 3 | 4;
 
 /** Issue. */
 export interface Issue {
+  /** Source system ID for mapping relationships */
+  sourceId?: string;
   /** Issue title */
   title: string;
   /** Description in markdown */
@@ -30,6 +32,21 @@ export interface Issue {
   archived?: boolean;
   /** Issue estimate */
   estimate?: number;
+  /** Attachments to be uploaded */
+  attachments?: {
+    fileName: string;
+    filePath: string;
+  }[];
+  /** Parent issue source IDs (current issue becomes sub-issue of parent) */
+  parentIds?: string[];
+  /** Child issue source IDs (to be linked as sub-issues) */
+  childIds?: string[];
+  /** Related issue source IDs (to be linked as 'related') */
+  relatedIds?: string[];
+  /** Predecessor issue source IDs (these block current issue) */
+  predecessorIds?: string[];
+  /** Successor issue source IDs (current issue blocks these) */
+  successorIds?: string[];
 }
 
 /** Issue comment */

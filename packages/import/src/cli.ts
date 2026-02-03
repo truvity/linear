@@ -7,6 +7,7 @@ import { asanaCsvImport } from "./importers/asanaCsv/index.ts";
 import { githubImport } from "./importers/github/index.ts";
 import { gitlabCsvImporter } from "./importers/gitlabCsv/index.ts";
 import { jiraCsvImport } from "./importers/jiraCsv/index.ts";
+import { kanbanizeImport } from "./importers/kanbanize/index.ts";
 import { linearCsvImporter } from "./importers/linearCsv/index.ts";
 import { pivotalCsvImport } from "./importers/pivotalCsv/index.ts";
 import { shortcutCsvImport } from "./importers/shortcutCsv/index.ts";
@@ -60,6 +61,10 @@ inquirer.registerPrompt("filePath", inquirerFilePath);
             name: "Linear (CSV export)",
             value: "linearCsv",
           },
+          {
+            name: "Kanbanize (JSON export)",
+            value: "kanbanize",
+          },
         ],
       },
     ]);
@@ -90,6 +95,9 @@ inquirer.registerPrompt("filePath", inquirerFilePath);
         break;
       case "linearCsv":
         importer = await linearCsvImporter();
+        break;
+      case "kanbanize":
+        importer = await kanbanizeImport();
         break;
       default:
         console.log(chalk.red(`Invalid importer`));

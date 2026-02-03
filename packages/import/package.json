@@ -9,7 +9,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "linear-import": "bin/linear-import.cjs"
+    "linear-import": "bin/linear-import.cjs",
+    "kanbanize-migration": "bin/kanbanize-migration.cjs"
   },
   "repository": "https://github.com/linear/linear",
   "engines": {
@@ -22,14 +23,17 @@
   "scripts": {
     "cli": "ts-node src/cli",
     "cli:local": "NODE_TLS_REJECT_UNAUTHORIZED=0 ts-node src/cli --apiUrl https://local.linear.dev:8090/graphql",
+    "kanbanize": "tsx src/kanbanize-cli",
     "dev:import": "NODE_ENV=development pnpm run build:import",
     "build:import": "tsdown --clean --format cjs src/cli.ts",
+    "build:kanbanize": "tsdown --clean --format cjs src/kanbanize-cli.ts",
     "build:types": "tsc --noEmit"
   },
   "dependencies": {
     "@linear/sdk": "workspace:*",
     "chalk": "4.1.2",
     "cli-progress": "^3.12.0",
+    "commander": "^11.0.0",
     "csvtojson": "2.0.10",
     "date-fns": "^2.19.0",
     "inquirer": "7.3.3",
@@ -37,12 +41,14 @@
     "jira2md": "2.0.4",
     "lodash": "4.17.21",
     "node-fetch": "2.6.1",
-    "ora": "^5.4.1"
+    "ora": "^5.4.1",
+    "turndown": "^7.1.2"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.5",
     "@types/inquirer": "^7.3.3",
     "@types/node-fetch": "^2.5.7",
+    "@types/turndown": "^5.0.4",
     "tsdown": "catalog:",
     "ts-node": "catalog:",
     "typescript": "catalog:"

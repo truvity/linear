@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import { LinearClient } from "@linear/sdk";
+import { LinearClient, IssueRelationType } from "@linear/sdk";
 import chalk from "chalk";
 import { Presets, SingleBar } from "cli-progress";
 import { format } from "date-fns";
@@ -9,6 +9,7 @@ import ora from "ora";
 import { handleLabels } from "./helpers/labelManager.ts";
 import type { Comment, Importer, ImportResult } from "./types.ts";
 import { replaceImagesInMarkdown } from "./utils/replaceImages.ts";
+import { uploadFileToLinear } from "./utils/uploadFileToLinear.ts";
 
 type Id = string;
 
@@ -228,12 +229,19 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
   issuesProgressBar.start(importData.issues.length, 0);
   let issueCursor = 0;
 
+  // Map sourceId to Linear issue ID for relationship creation
+  const sourceIdToLinearId = new Map<string, string>();
+
   // Create issues
   for (const issue of importData.issues) {
-    const issueDescription = issue.description
+    let issueDescription = issue.description
       ? await replaceImagesInMarkdown(client, issue.description, importData.resourceURLSuffix)
       : undefined;
 
+    // Upload and add attachments
+    issueDescription = await buildAttachments(client, issueDescription || "", issue.attachments);
+
+    // Add comments if requested
     const description =
       importAnswers.includeComments && issue.comments
         ? await buildComments(client, issueDescription || "", issue.comments, importData)
@@ -297,8 +305,21 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
         estimate: issue.estimate,
       });
 
-      if (issue.archived) {
-        await (await createdIssue.issue)?.archive();
+      const linearIssue = await createdIssue.issue;
+
+      if (linearIssue?.id && issue.sourceId) {
+        sourceIdToLinearId.set(issue.sourceId, linearIssue.id);
+      }
+
+      if (issue.archived && linearIssue) {
+        await linearIssue.archive();
+      }
+
+      // Create native attachment link for the original issue URL
+      if (issue.url && linearIssue?.id) {
+        await createAttachmentLinkWithRetries(client, linearIssue.id, issue.url, "View original card in Kanbanize");
+        // Small delay to avoid hitting rate limits (20 requests per minute for this endpoint)
+        await new Promise(resolve => setTimeout(resolve, 3500));
       }
 
       issueCursor++;
@@ -310,6 +331,147 @@ export const importIssues = async (apiKey: string, importer: Importer, apiUrl?: 
   }
 
   issuesProgressBar.stop();
+
+  // Create native relationships
+  const issuesWithRelationships = importData.issues.filter(
+    issue =>
+      (issue.parentIds && issue.parentIds.length > 0) ||
+      (issue.childIds && issue.childIds.length > 0) ||
+      (issue.relatedIds && issue.relatedIds.length > 0) ||
+      (issue.predecessorIds && issue.predecessorIds.length > 0) ||
+      (issue.successorIds && issue.successorIds.length > 0)
+  );
+
+  if (issuesWithRelationships.length > 0) {
+    spinner = ora("Creating issue relationships").start();
+    let relationshipsCreated = 0;
+    let relationshipsFailed = 0;
+
+    for (const issue of issuesWithRelationships) {
+      if (!issue.sourceId) {
+        continue;
+      }
+
+      const issueId = sourceIdToLinearId.get(issue.sourceId);
+      if (!issueId) {
+        continue;
+      }
+
+      // Create parent relationship (as sub-issue in Linear)
+      if (issue.parentIds && issue.parentIds.length > 0) {
+        // Linear only supports one parent per issue, so use the first one
+        const parentSourceId = issue.parentIds[0];
+        const parentId = sourceIdToLinearId.get(parentSourceId);
+
+        if (parentId) {
+          try {
+            await client.updateIssue(issueId, {
+              parentId: parentId,
+            });
+            relationshipsCreated++;
+
+            // Warn if there are additional parents that cannot be linked
+            if (issue.parentIds.length > 1) {
+              console.warn(
+                `Warning: Issue ${issueId} has ${issue.parentIds.length} parents in Kanbanize, but Linear only supports one parent. Using first parent only.`
+              );
+            }
+          } catch (error) {
+            relationshipsFailed++;
+            console.warn(`Warning: Failed to create parent relationship for issue ${issueId}:`, error);
+          }
+        }
+      }
+
+      // Create child relationships (as sub-issues in Linear)
+      if (issue.childIds && issue.childIds.length > 0) {
+        for (const childSourceId of issue.childIds) {
+          const childId = sourceIdToLinearId.get(childSourceId);
+          if (childId) {
+            try {
+              await client.updateIssue(childId, {
+                parentId: issueId,
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create child relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create related relationships
+      if (issue.relatedIds && issue.relatedIds.length > 0) {
+        for (const relatedSourceId of issue.relatedIds) {
+          const relatedId = sourceIdToLinearId.get(relatedSourceId);
+          if (relatedId) {
+            try {
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: relatedId,
+                type: IssueRelationType.Related,
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create related relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create predecessor relationships (predecessor blocks current issue)
+      if (issue.predecessorIds && issue.predecessorIds.length > 0) {
+        for (const predecessorSourceId of issue.predecessorIds) {
+          const predecessorId = sourceIdToLinearId.get(predecessorSourceId);
+          if (predecessorId) {
+            try {
+              // Predecessor blocks this issue
+              await client.createIssueRelation({
+                issueId: predecessorId,
+                relatedIssueId: issueId,
+                type: IssueRelationType.Blocks,
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create predecessor relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+
+      // Create successor relationships (current issue blocks successor)
+      if (issue.successorIds && issue.successorIds.length > 0) {
+        for (const successorSourceId of issue.successorIds) {
+          const successorId = sourceIdToLinearId.get(successorSourceId);
+          if (successorId) {
+            try {
+              // This issue blocks successor
+              await client.createIssueRelation({
+                issueId,
+                relatedIssueId: successorId,
+                type: IssueRelationType.Blocks,
+              });
+              relationshipsCreated++;
+            } catch (error) {
+              relationshipsFailed++;
+              console.warn(`Warning: Failed to create successor relationship for issue ${issueId}:`, error);
+            }
+          }
+        }
+      }
+    }
+
+    spinner.stop();
+    console.info(
+      chalk.green(
+        `Created ${relationshipsCreated} issue relationship(s)` +
+          (relationshipsFailed > 0 ? chalk.yellow(` (${relationshipsFailed} failed)`) : "")
+      )
+    );
+  }
 
   console.info(chalk.green(`${importer.name} issues imported to your team: https://linear.app/team/${teamKey}/all`));
 };
@@ -326,10 +488,47 @@ const buildComments = async (
     const user = importData.users[comment.userId];
     const date = comment.createdAt ? comment.createdAt.toISOString().split("T")[0] : undefined;
 
+    // Use fallback name if user doesn't exist (e.g., users without email)
+    const userName = user?.name || `User ${comment.userId}`;
+
     const body = await replaceImagesInMarkdown(client, comment.body || "", importData.resourceURLSuffix);
-    newComments.push(`**${user.name}**${" " + date}\n\n${body}\n`);
+    newComments.push(`**${userName}**${" " + date}\n\n${body}\n`);
   }
-  return `${description}\n\n---\n\n${newComments.join("\n\n")}`;
+
+  if (newComments.length === 0) {
+    return description;
+  }
+
+  return `${description}\n\n---\n\n**Comments from Kanbanize**\n\n${newComments.join("\n\n")}`;
+};
+
+// Upload attachments and append them to the issue description
+const buildAttachments = async (
+  client: LinearClient,
+  description: string,
+  attachments?: { fileName: string; filePath: string }[]
+) => {
+  if (!attachments || attachments.length === 0) {
+    return description;
+  }
+
+  const attachmentLinks: string[] = [];
+
+  for (const attachment of attachments) {
+    try {
+      const assetUrl = await uploadFileToLinear(client, attachment.filePath, attachment.fileName);
+      attachmentLinks.push(`- [${attachment.fileName}](${assetUrl})`);
+    } catch (error) {
+      console.warn(`Warning: Failed to upload attachment ${attachment.fileName}:`, error);
+      // Continue with other attachments even if one fails
+    }
+  }
+
+  if (attachmentLinks.length === 0) {
+    return description;
+  }
+
+  return `${description}\n\n---\n\n**Attachments from Kanbanize**\n\n${attachmentLinks.join("\n")}`;
 };
 
 const createIssueWithRetries = async (
@@ -345,6 +544,34 @@ const createIssueWithRetries = async (
       // header to find out how long to wait.
       await new Promise(resolve => setTimeout(resolve, 60000));
       return createIssueWithRetries(client, input, retries - 1);
+    } else {
+      throw error;
+    }
+  }
+};
+
+const createAttachmentLinkWithRetries = async (
+  client: LinearClient,
+  issueId: string,
+  url: string,
+  title: string,
+  retries = 3
+): Promise<void> => {
+  try {
+    await client.attachmentLinkURL(issueId, url, { title });
+  } catch (error) {
+    if (error.type === "Ratelimited" && retries > 0) {
+      // Get the reset time from the error if available
+      const resetAt = error.complexityResetAt || Date.now() + 60000;
+      const waitTime = Math.max(resetAt - Date.now(), 1000);
+
+      console.warn(`Rate limit hit for attachment links. Waiting ${Math.ceil(waitTime / 1000)}s before retrying...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+
+      return createAttachmentLinkWithRetries(client, issueId, url, title, retries - 1);
+    } else if (error.type !== "Ratelimited") {
+      // Don't throw on non-rate-limit errors, just log them
+      console.warn(`Warning: Failed to create attachment link for issue ${issueId}:`, error.message || error);
     } else {
       throw error;
     }
