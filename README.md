@@ -51,6 +51,8 @@ Generated code uses file prefix `_generated` and should never be manually update
 Open source packages:
 - [sdk](https://github.com/linear/linear/tree/master/packages/sdk/README.md) - The Linear Client SDK for interacting with the Linear GraphQL API
 - [import](https://github.com/linear/linear/tree/master/packages/import/README.md) - Import tooling for uploading from other systems
+  - Includes the Kanbanize exporter and importer CLI (run locally via `pnpm kanbanize export` and `pnpm kanbanize import`)
+  - See the [import package README](https://github.com/linear/linear/tree/master/packages/import/README.md#kanbanize) for detailed Kanbanize usage instructions
 - [codegen-doc](https://github.com/linear/linear/tree/master/packages/codegen-doc/README.md) - GraphQL codegen plugin to generate GraphQL fragments and documents
 - [codegen-sdk](https://github.com/linear/linear/tree/master/packages/codegen-sdk/README.md) - GraphQL codegen plugin to generate Typescript SDK from fragments and documents
 - [codegen-test](https://github.com/linear/linear/tree/master/packages/codegen-test/README.md) - GraphQL codegen plugin to generate a jest test for the Typescript SDK

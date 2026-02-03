@@ -140,6 +140,64 @@ The following fields are supported:
 - `Weight` - Issue priority
 - `Time Estimate` - Issue estimate
 
+### Kanbanize
+
+The `kanbanize-migration` CLI tool provides a complete migration solution for Kanbanize boards with both export and import commands.
+
+**Setup:**
+
+Clone this repository and install dependencies:
+
+```bash
+git clone https://github.com/linear/linear.git
+cd linear
+pnpm install
+pnpm build
+```
+
+**Export from Kanbanize:**
+
+```bash
+# Interactive mode - select boards to export
+KANBANIZE_API_KEY=xxx pnpm kanbanize export
+
+# Or specify board IDs directly
+KANBANIZE_API_KEY=xxx pnpm kanbanize export --board-ids 7,8,10
+```
+
+**Import to Linear:**
+
+```bash
+# Interactive mode
+LINEAR_API_KEY=yyy pnpm kanbanize import
+
+# Or use board ID (looks in default export directory)
+LINEAR_API_KEY=yyy pnpm kanbanize import --board-id 7
+```
+
+**Additional import options:**
+
+- `--swimlane-ids` - Comma-separated list of swimlane IDs to import
+- `--sections` - Comma-separated list of sections (1=Backlog, 2=Requested, 3=Progress, 4=Done, 5=Archive)
+- `--status-mapping` - Path to JSON file mapping column names to Linear status names
+
+The following fields are supported:
+
+- `Title` - Issue title
+- `Description` - Converted from HTML to markdown
+- `Custom ID` - Preserved as issue identifier
+- `Priority` - Mapped to Linear priority (Critical→Urgent, High→High, Average→Medium, Low→Low)
+- `Size` - Mapped to issue estimate
+- `Tags` - Added as labels
+- `Owner` - Issue assignee
+- `Column` - Mapped to Linear workflow state based on section
+- `Deadline` - Issue due date
+- `Created At` - Issue creation date
+- `Comments` - Added as issue comments with author attribution
+- `Attachments` - Uploaded to Linear (both card and comment attachments)
+- `Linked Cards` - Added as links in the issue description
+- (Optional) `Archived` - Issues can be created as archived based on section
+
 <!-- AUTO-GENERATED-CONTENT:START (TEXT_SECTION:id=license&src=../../README.md) -->
 ## License
 
